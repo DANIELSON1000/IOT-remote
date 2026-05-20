@@ -19,6 +19,7 @@ from email.mime.multipart import MIMEMultipart
 import socket
 import os
 from pathlib import Path
+import urllib.request
 
 # -------------------------
 # Page Configuration
@@ -122,49 +123,152 @@ for key, val in {
     'use_manual_ip': True,
     'prediction': None,
     'prediction_probability': None,
-    'db_write_count': 0
+    'db_write_count': 0,
+    'model_loaded': False,
+    'model_error': None
 }.items():
     if key not in st.session_state:
         st.session_state[key] = val
 
 # -------------------------
-# Load ML Model
+# Load ML Model - Enhanced with GitHub fallback
 # -------------------------
 @st.cache_resource
+def download_model_from_github():
+    """Attempt to download the model from GitHub if not found locally"""
+    model_urls = [
+        "https://raw.githubusercontent.com/yourusername/yourrepo/main/network_congestion_model.pkl",
+        "https://github.com/yourusername/yourrepo/raw/main/network_congestion_model.pkl",
+        # Add your actual GitHub raw URL here
+    ]
+    
+    for url in model_urls:
+        try:
+            st.info(f"Attempting to download model from: {url}")
+            response = requests.get(url, timeout=10)
+            if response.status_code == 200:
+                with open("network_congestion_model.pkl", "wb") as f:
+                    f.write(response.content)
+                return True
+        except:
+            continue
+    return False
+
+@st.cache_resource
 def load_congestion_model():
-    """Load the pre-trained Random Forest model"""
-    try:
-        model = joblib.load("network_congestion_model.pkl")
-        return model
-    except Exception as e:
-        st.warning(f"⚠️ Could not load congestion prediction model: {str(e)}")
-        return None
+    """Load the pre-trained Random Forest model with fallback"""
+    model_path = Path("network_congestion_model.pkl")
+    
+    # Check if model exists locally
+    if model_path.exists():
+        try:
+            model = joblib.load(model_path)
+            st.session_state.model_loaded = True
+            st.session_state.model_error = None
+            return model
+        except Exception as e:
+            st.session_state.model_error = str(e)
+    
+    # If not, try to download from GitHub
+    st.warning("⚠️ Model file not found locally. Attempting to download from GitHub...")
+    if download_model_from_github():
+        try:
+            model = joblib.load(model_path)
+            st.session_state.model_loaded = True
+            st.session_state.model_error = None
+            add_log_entry("INFO", "Model downloaded and loaded successfully")
+            return model
+        except Exception as e:
+            st.session_state.model_error = str(e)
+    
+    # If still failing, create a simple rule-based model
+    st.warning("⚠️ Could not load ML model. Using rule-based congestion detection.")
+    add_log_entry("WARNING", "ML model unavailable - using rule-based detection")
+    st.session_state.model_loaded = False
+    return None
+
+def predict_congestion_rule_based(google_latency, google_packet_loss, google_bandwidth, 
+                                   youtube_latency, youtube_packet_loss, youtube_bandwidth):
+    """Rule-based fallback when ML model is unavailable"""
+    # Simple scoring logic
+    latency_score = 0
+    loss_score = 0
+    bandwidth_score = 0
+    
+    # Latency assessment
+    avg_latency = (google_latency + youtube_latency) / 2
+    if avg_latency < 50:
+        latency_score = 0
+    elif avg_latency < 100:
+        latency_score = 0.3
+    elif avg_latency < 150:
+        latency_score = 0.6
+    else:
+        latency_score = 0.9
+    
+    # Packet loss assessment
+    avg_loss = (google_packet_loss + youtube_packet_loss) / 2
+    if avg_loss < 0.5:
+        loss_score = 0
+    elif avg_loss < 1:
+        loss_score = 0.3
+    elif avg_loss < 2:
+        loss_score = 0.6
+    else:
+        loss_score = 0.9
+    
+    # Bandwidth assessment
+    avg_bandwidth = (google_bandwidth + youtube_bandwidth) / 2
+    if avg_bandwidth > 50:
+        bandwidth_score = 0
+    elif avg_bandwidth > 30:
+        bandwidth_score = 0.3
+    elif avg_bandwidth > 10:
+        bandwidth_score = 0.6
+    else:
+        bandwidth_score = 0.9
+    
+    # Combined probability
+    probability = (latency_score * 0.4 + loss_score * 0.35 + bandwidth_score * 0.25)
+    prediction = 1 if probability > 0.5 else 0
+    
+    return prediction, probability
 
 def predict_congestion(google_latency, google_packet_loss, google_bandwidth, 
                        youtube_latency, youtube_packet_loss, youtube_bandwidth,
                        active_devices=10):
-    """Predict network congestion using the ML model"""
+    """Predict network congestion using ML model or rule-based fallback"""
     model = load_congestion_model()
-    if model is None:
-        return None, None
     
+    # Use worst metrics for conservative prediction
     latency = max(google_latency, youtube_latency)
     packet_loss = max(google_packet_loss, youtube_packet_loss)
     bandwidth = min(google_bandwidth, youtube_bandwidth)
     
-    features = np.array([[active_devices, latency, packet_loss, bandwidth]])
+    # If ML model is available, use it
+    if model is not None:
+        features = np.array([[active_devices, latency, packet_loss, bandwidth]])
+        try:
+            prediction = model.predict(features)[0]
+            if hasattr(model, 'predict_proba'):
+                proba = model.predict_proba(features)[0]
+                probability = proba[1] if prediction == 1 else proba[0]
+            else:
+                probability = 0.95 if prediction == 1 else 0.85
+            return prediction, probability
+        except Exception as e:
+            print(f"ML Prediction error: {str(e)}")
+            # Fall back to rule-based
+            return predict_congestion_rule_based(
+                google_latency, google_packet_loss, google_bandwidth,
+                youtube_latency, youtube_packet_loss, youtube_bandwidth
+            )
     
-    try:
-        prediction = model.predict(features)[0]
-        if hasattr(model, 'predict_proba'):
-            proba = model.predict_proba(features)[0]
-            probability = proba[1] if prediction == 1 else proba[0]
-        else:
-            probability = 0.95 if prediction == 1 else 0.85
-        return prediction, probability
-    except Exception as e:
-        print(f"Prediction error: {str(e)}")
-        return None, None
+    # Use rule-based fallback
+    return predict_congestion_rule_based(
+        google_latency, google_packet_loss, google_bandwidth,
+        youtube_latency, youtube_packet_loss, youtube_bandwidth
+    )
 
 def get_congestion_risk_level(probability):
     """Convert probability to risk level"""
@@ -188,10 +292,6 @@ def score_color(score):
     elif score >= 40: return "#ffe600"
     elif score >= 20: return "#ff6b00"
     else: return "#ff003c"
-
-def score_shadow(score):
-    c = score_color(score)
-    return f"0 0 20px {c}80, 0 0 40px {c}40"
 
 def get_network_status(score):
     if score >= 80: return "EXCELLENT"
@@ -380,6 +480,7 @@ def get_data_stats():
 # ESP8266 Functions
 # -------------------------
 def test_esp_connection(ip):
+    """Test connection to ESP8266"""
     try:
         url = f"http://{ip}:{ESP8266_PORT}/status"
         response = requests.get(url, timeout=2)
@@ -387,13 +488,14 @@ def test_esp_connection(ip):
             return True, response.text
         return False, f"HTTP {response.status_code}"
     except requests.exceptions.ConnectionError:
-        return False, "Connection refused"
+        return False, "Connection refused - Check IP and that ESP is powered"
     except requests.exceptions.Timeout:
-        return False, "Timeout"
+        return False, "Timeout - ESP not responding"
     except Exception as e:
         return False, str(e)
 
 def send_esp_command(command_endpoint):
+    """Send command to ESP8266"""
     if not st.session_state.esp_ip:
         return False, "No ESP8266 IP configured"
     
@@ -416,6 +518,7 @@ def send_esp_command(command_endpoint):
         return False, str(e)
 
 def apply_test_scenario(scenario_key):
+    """Apply a test scenario via ESP8266"""
     scenario = TEST_SCENARIOS.get(scenario_key, {})
     endpoint = scenario.get('esp_endpoint', '')
     if not endpoint:
@@ -439,6 +542,7 @@ def apply_test_scenario(scenario_key):
 # Email Functions
 # -------------------------
 def test_email_connection():
+    """Test email configuration"""
     if not EMAIL_CONFIG['sender_email'] or not EMAIL_CONFIG['sender_password']:
         return False, "Email credentials not configured"
     try:
@@ -451,6 +555,7 @@ def test_email_connection():
         return False, str(e)
 
 def send_email_notification(subject, body, alert_type="general"):
+    """Send email notification"""
     last_sent = st.session_state.last_notification_sent.get(alert_type, datetime.min)
     if (datetime.now() - last_sent).total_seconds() < NOTIFICATION_COOLDOWN:
         return False, "Cooldown active"
@@ -495,6 +600,7 @@ def send_email_notification(subject, body, alert_type="general"):
         return False, str(e)
 
 def check_and_send_alerts(data, prediction, probability):
+    """Check thresholds and send alerts"""
     if not data:
         return
     
@@ -516,6 +622,7 @@ def check_and_send_alerts(data, prediction, probability):
 # ThingSpeak Fetch
 # -------------------------
 def fetch_thingspeak_data():
+    """Fetch latest data from ThingSpeak"""
     try:
         CHANNEL_ID = "3381959"
         READ_API_KEY = "8F8XKE0PABJFF6GG"
@@ -574,6 +681,7 @@ def fetch_thingspeak_data():
         return None, OFFLINE_THRESHOLD_SECONDS, None, "offline"
 
 def refresh_data():
+    """Refresh all data from ThingSpeak and update predictions"""
     data, td, lu, status = fetch_thingspeak_data()
     if data and data['network_score'] > 0:
         prev = st.session_state.data
@@ -916,6 +1024,20 @@ st.markdown("""
         font-size: 1.2rem;
         color: #00f5ff;
     }
+    
+    .esp-config-box {
+        background: rgba(0, 245, 255, 0.05);
+        border: 1px solid rgba(0, 245, 255, 0.2);
+        border-radius: 8px;
+        padding: 10px;
+        margin: 10px 0;
+    }
+    
+    .info-text {
+        font-family: 'Share Tech Mono', monospace;
+        font-size: 0.7rem;
+        color: #5a7a9a;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -940,6 +1062,9 @@ def main():
     st.session_state.pulse_triggered = False
     
     stats = get_data_stats()
+    
+    # Show model status in header badge
+    model_status = "🤖 AI ACTIVE" if st.session_state.model_loaded else "⚠️ AI FALLBACK MODE"
 
     # Header
     st.markdown(f"""
@@ -950,7 +1075,7 @@ def main():
             <span class="pulse-dot"></span>
             LIVE · UPDATE #{st.session_state.update_count}
             {(' · 🧪 TEST MODE' if st.session_state.test_mode else '')}
-            {' · 🤖 AI ACTIVE' if load_congestion_model() is not None else ''}
+            {' · ' + model_status if load_congestion_model() is not None or not st.session_state.model_loaded else ''}
             <span style="margin-left: 12px;">💾 RECORDS: {stats['total_records']}</span>
         </div>
     </div>
@@ -986,6 +1111,8 @@ def main():
             🔌 ESP8266 CONTROL
         </div>
         """, unsafe_allow_html=True)
+        
+        st.markdown('<div class="esp-config-box">', unsafe_allow_html=True)
 
         col_ip1, col_ip2 = st.columns([3, 1])
         with col_ip1:
@@ -1016,7 +1143,9 @@ def main():
                             st.error(f"❌ {msg}")
                 else:
                     st.warning("Enter IP first")
-
+        
+        st.markdown('<div class="info-text">📡 Example: 192.168.1.100 (your ESP IP)</div>', unsafe_allow_html=True)
+        
         if st.session_state.esp_ip:
             if st.session_state.esp_status == 'connected':
                 st.markdown(f"""
@@ -1047,13 +1176,15 @@ def main():
                     <span class="sidebar-stat-value">{st.session_state.esp_ip}</span>
                 </div>
                 """, unsafe_allow_html=True)
+                st.info("💡 Make sure your ESP8266 is powered and running the NetPulse firmware")
         else:
-            st.info("📡 Enter ESP8266 IP and click CONNECT")
+            st.info("📡 Enter ESP8266 IP address and click CONNECT")
+        
+        st.markdown('</div>', unsafe_allow_html=True)
 
-        st.markdown('<div class="cyber-divider"></div>', unsafe_allow_html=True)
-
-        # Network Test Panel
+        # Network Test Panel (only show if ESP connected)
         if st.session_state.esp_ip and st.session_state.esp_status == 'connected':
+            st.markdown('<div class="cyber-divider"></div>', unsafe_allow_html=True)
             st.markdown("""
             <div style="font-family:'Orbitron',monospace; font-size:0.7rem; letter-spacing:0.15rem;
                  color:#00f5ff; margin-bottom:8px;">
@@ -1102,8 +1233,8 @@ def main():
                         st.rerun()
                     else:
                         st.error(f"❌ {msg}")
-            
-            st.markdown('<div class="cyber-divider"></div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="cyber-divider"></div>', unsafe_allow_html=True)
 
         # Email Settings
         st.markdown("""
@@ -1133,7 +1264,7 @@ def main():
                 <span class="sidebar-stat-value">{int(next_refresh)}s</span>
             </div>
             <div class="sidebar-stat">
-                <span class="sidebar-stat-label">💾 DB SAVE</span>
+                <span class="sidebar-stat-label">💾 SAVE INTERVAL</span>
                 <span class="sidebar-stat-value" style="color:#00ff88;">{int(time_until_save)}s</span>
             </div>
             """, unsafe_allow_html=True)
@@ -1203,6 +1334,9 @@ def main():
                     prob = st.session_state.prediction_probability if st.session_state.prediction_probability else 0
                     risk_level, risk_color, risk_msg = get_congestion_risk_level(prob)
                     
+                    # Show model mode indicator
+                    model_mode = "🤖 ML Model" if st.session_state.model_loaded else "📊 Rule-Based"
+                    
                     if pred == 1:
                         st.markdown(f"""
                         <div class="prediction-card" style="border: 1px solid {risk_color};">
@@ -1210,7 +1344,7 @@ def main():
                                 ⚠️ CONGESTION PREDICTED
                             </div>
                             <div class="prediction-message">
-                                🤖 AI Model Confidence: {prob*100:.1f}%<br>
+                                {model_mode} Confidence: {prob*100:.1f}%<br>
                                 Risk Level: <span style="color:{risk_color}; font-weight:bold;">{risk_level}</span><br>
                                 {risk_msg}
                             </div>
@@ -1223,7 +1357,7 @@ def main():
                                 ✓ NO CONGESTION PREDICTED
                             </div>
                             <div class="prediction-message">
-                                🤖 AI Model Confidence: {prob*100:.1f}%<br>
+                                {model_mode} Confidence: {prob*100:.1f}%<br>
                                 Risk Level: <span style="color:{risk_color}; font-weight:bold;">{risk_level}</span><br>
                                 {risk_msg}
                             </div>
