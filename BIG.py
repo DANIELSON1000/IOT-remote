@@ -21,6 +21,11 @@ import os
 from pathlib import Path
 import urllib.request
 import time
+import sys
+
+# Suppress warnings
+import warnings
+warnings.filterwarnings('ignore')
 
 # -------------------------
 # Page Configuration
@@ -126,18 +131,37 @@ for key, val in {
     'prediction_probability': None,
     'db_write_count': 0,
     'model_loaded': False,
-    'model_error': None
+    'model_error': None,
+    'model_download_attempted': False
 }.items():
     if key not in st.session_state:
         st.session_state[key] = val
 
 # -------------------------
-# Load ML Model - From GitHub
+# CSV Storage Functions (defined early for logging)
+# -------------------------
+def add_log_entry(log_type, message):
+    """Add entry to system logs CSV"""
+    try:
+        new_entry = pd.DataFrame([{
+            'timestamp': datetime.now(),
+            'log_type': log_type,
+            'message': message
+        }])
+        existing = pd.read_csv(LOGS_CSV) if LOGS_CSV.exists() else pd.DataFrame()
+        updated = pd.concat([existing, new_entry], ignore_index=True)
+        updated.to_csv(LOGS_CSV, index=False)
+        if len(updated) > 1000:
+            updated.tail(1000).to_csv(LOGS_CSV, index=False)
+    except Exception as e:
+        print(f"Log error: {e}")
+
+# -------------------------
+# Load ML Model - Silent version (no UI messages)
 # -------------------------
 @st.cache_resource
 def download_model_from_github():
-    """Download the model from GitHub"""
-    # Your GitHub raw URL - UPDATED FOR DANIELSON1000/IOT-remote
+    """Download the model from GitHub silently"""
     model_urls = [
         "https://raw.githubusercontent.com/DANIELSON1000/IOT-remote/main/network_congestion_model.pkl",
         "https://github.com/DANIELSON1000/IOT-remote/raw/main/network_congestion_model.pkl",
@@ -145,23 +169,31 @@ def download_model_from_github():
     
     for url in model_urls:
         try:
-            st.info(f"📥 Downloading model from GitHub...")
             response = requests.get(url, timeout=15)
             if response.status_code == 200:
                 with open("network_congestion_model.pkl", "wb") as f:
                     f.write(response.content)
-                st.success("✅ Model downloaded successfully!")
+                add_log_entry("INFO", f"Model downloaded from {url}")
                 return True
             else:
-                st.warning(f"Failed to download from {url} (Status: {response.status_code})")
+                add_log_entry("WARNING", f"Model download failed from {url} (Status: {response.status_code})")
         except Exception as e:
-            st.warning(f"Error downloading from {url}: {str(e)}")
+            add_log_entry("WARNING", f"Model download error from {url}: {str(e)}")
             continue
     return False
 
 @st.cache_resource
 def load_congestion_model():
-    """Load the pre-trained Random Forest model"""
+    """Load the pre-trained Random Forest model silently"""
+    # Check if sklearn is available
+    try:
+        import sklearn
+        add_log_entry("INFO", f"scikit-learn version {sklearn.__version__} available")
+    except ImportError:
+        add_log_entry("WARNING", "scikit-learn not installed - using rule-based detection")
+        st.session_state.model_loaded = False
+        return None
+    
     model_path = Path("network_congestion_model.pkl")
     
     # Check if model exists locally
@@ -170,28 +202,29 @@ def load_congestion_model():
             model = joblib.load(model_path)
             st.session_state.model_loaded = True
             st.session_state.model_error = None
-            add_log_entry("INFO", "ML model loaded from local file")
+            add_log_entry("INFO", "ML model loaded successfully from local file")
             return model
         except Exception as e:
             st.session_state.model_error = str(e)
-            st.warning(f"Error loading local model: {str(e)}")
+            add_log_entry("ERROR", f"Error loading local model: {str(e)}")
     
-    # Try to download from GitHub
-    st.info("🔍 Model not found locally. Attempting to download from GitHub...")
-    if download_model_from_github():
-        try:
-            model = joblib.load(model_path)
-            st.session_state.model_loaded = True
-            st.session_state.model_error = None
-            add_log_entry("INFO", "ML model downloaded and loaded from GitHub")
-            return model
-        except Exception as e:
-            st.session_state.model_error = str(e)
-            st.warning(f"Error loading downloaded model: {str(e)}")
+    # Try to download from GitHub (only once)
+    if not st.session_state.model_download_attempted:
+        st.session_state.model_download_attempted = True
+        add_log_entry("INFO", "Model not found locally, attempting download from GitHub...")
+        if download_model_from_github():
+            try:
+                model = joblib.load(model_path)
+                st.session_state.model_loaded = True
+                st.session_state.model_error = None
+                add_log_entry("INFO", "ML model downloaded and loaded successfully")
+                return model
+            except Exception as e:
+                st.session_state.model_error = str(e)
+                add_log_entry("ERROR", f"Error loading downloaded model: {str(e)}")
     
     # Fallback to rule-based
-    st.warning("⚠️ Using rule-based congestion detection (ML model unavailable)")
-    add_log_entry("WARNING", "ML model unavailable - using rule-based detection")
+    add_log_entry("WARNING", "Using rule-based congestion detection (ML model unavailable)")
     st.session_state.model_loaded = False
     return None
 
@@ -265,7 +298,7 @@ def predict_congestion(google_latency, google_packet_loss, google_bandwidth,
                 probability = 0.95 if prediction == 1 else 0.85
             return prediction, probability
         except Exception as e:
-            print(f"ML Prediction error: {str(e)}")
+            add_log_entry("ERROR", f"ML Prediction error: {str(e)}")
             return predict_congestion_rule_based(
                 google_latency, google_packet_loss, google_bandwidth,
                 youtube_latency, youtube_packet_loss, youtube_bandwidth
@@ -358,24 +391,8 @@ def generate_recommendations(data):
     return recs
 
 # -------------------------
-# CSV Storage Functions
+# Save Functions
 # -------------------------
-def add_log_entry(log_type, message):
-    """Add entry to system logs CSV"""
-    try:
-        new_entry = pd.DataFrame([{
-            'timestamp': datetime.now(),
-            'log_type': log_type,
-            'message': message
-        }])
-        existing = pd.read_csv(LOGS_CSV) if LOGS_CSV.exists() else pd.DataFrame()
-        updated = pd.concat([existing, new_entry], ignore_index=True)
-        updated.to_csv(LOGS_CSV, index=False)
-        if len(updated) > 1000:
-            updated.tail(1000).to_csv(LOGS_CSV, index=False)
-    except Exception as e:
-        print(f"Log error: {e}")
-
 def save_classified_metrics(data, prediction, probability):
     """Save metrics to CSV file"""
     if not data or data['network_score'] == 0:
@@ -484,7 +501,7 @@ def get_data_stats():
     return stats
 
 # -------------------------
-# ESP8266 Functions - IMPROVED
+# ESP8266 Functions
 # -------------------------
 def test_esp_connection(ip):
     """Test connection to ESP8266 with better error handling"""
@@ -501,13 +518,8 @@ def test_esp_connection(ip):
             if response.status_code == 200:
                 return True, f"Connected on port {port}"
             elif response.status_code == 404:
-                # Server exists but endpoint not found
-                return True, f"ESP reachable (port {port}) - Check endpoint"
-        except requests.exceptions.ConnectionError:
-            continue
-        except requests.exceptions.Timeout:
-            continue
-        except Exception:
+                return True, f"ESP reachable (port {port})"
+        except:
             continue
     
     # Try ping-like check using socket
@@ -517,18 +529,17 @@ def test_esp_connection(ip):
         result = sock.connect_ex((ip, 80))
         sock.close()
         if result == 0:
-            return False, "ESP reachable but not responding to HTTP. Check if ESP web server is running."
+            return False, "ESP reachable but not responding to HTTP"
         else:
-            return False, f"Cannot reach {ip}. Check: 1) ESP powered on 2) Same WiFi 3) Correct IP"
+            return False, f"Cannot reach {ip}"
     except:
-        return False, f"Cannot reach {ip}. Verify ESP is on and connected."
+        return False, f"Cannot reach {ip}"
 
 def send_esp_command(command_endpoint):
     """Send command to ESP8266"""
     if not st.session_state.esp_ip:
-        return False, "No ESP8266 IP configured. Click CONNECT first."
+        return False, "No ESP8266 IP configured"
     
-    # Test connection first
     success, msg = test_esp_connection(st.session_state.esp_ip)
     if not success:
         st.session_state.esp_status = 'disconnected'
@@ -546,10 +557,6 @@ def send_esp_command(command_endpoint):
         else:
             return False, f"HTTP {response.status_code}"
             
-    except requests.exceptions.ConnectionError:
-        return False, "Connection refused"
-    except requests.exceptions.Timeout:
-        return False, "Timeout - ESP not responding"
     except Exception as e:
         st.session_state.esp_status = 'error'
         return False, str(e)
@@ -1100,7 +1107,7 @@ def main():
     
     stats = get_data_stats()
     
-    # Try to load model on startup
+    # Try to load model on startup (silently)
     if st.session_state.model_loaded is False and st.session_state.model_error is None:
         load_congestion_model()
     
@@ -1108,7 +1115,7 @@ def main():
     if st.session_state.model_loaded:
         model_status = "🤖 AI ACTIVE"
     else:
-        model_status = "⚠️ RULE-BASED MODE"
+        model_status = "📊 RULE-BASED"
 
     # Header
     st.markdown(f"""
