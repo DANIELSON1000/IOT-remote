@@ -44,7 +44,7 @@ ONLINE_THRESHOLD_SECONDS = 60
 STALE_THRESHOLD_SECONDS = 120
 OFFLINE_THRESHOLD_SECONDS = 300
 REFRESH_INTERVAL = 15
-DATABASE_SAVE_INTERVAL = 10
+DATABASE_SAVE_INTERVAL = 5  # Save every 5 seconds
 
 ESP8266_PORT = 80
 
@@ -85,25 +85,6 @@ METRICS_CSV = DATA_DIR / "network_metrics.csv"
 RECOMMENDATIONS_CSV = DATA_DIR / "recommendations.csv"
 LOGS_CSV = DATA_DIR / "system_logs.csv"
 
-# Initialize CSV files with headers if they don't exist
-if not METRICS_CSV.exists():
-    pd.DataFrame(columns=[
-        'timestamp', 'google_latency', 'google_packet_loss', 'google_bandwidth', 'google_quality',
-        'youtube_latency', 'youtube_packet_loss', 'youtube_bandwidth', 'youtube_quality',
-        'combined_speed', 'network_score', 'network_status', 'congestion_prediction', 
-        'prediction_probability', 'test_mode'
-    ]).to_csv(METRICS_CSV, index=False)
-
-if not RECOMMENDATIONS_CSV.exists():
-    pd.DataFrame(columns=[
-        'timestamp', 'service', 'recommendation', 'severity', 'network_score', 'network_status'
-    ]).to_csv(RECOMMENDATIONS_CSV, index=False)
-
-if not LOGS_CSV.exists():
-    pd.DataFrame(columns=[
-        'timestamp', 'log_type', 'message'
-    ]).to_csv(LOGS_CSV, index=False)
-
 # -------------------------
 # Session State
 # -------------------------
@@ -138,26 +119,173 @@ for key, val in {
         st.session_state[key] = val
 
 # -------------------------
-# CSV Storage Functions (defined early for logging)
+# CSV Storage Functions
 # -------------------------
 def add_log_entry(log_type, message):
     """Add entry to system logs CSV"""
     try:
         new_entry = pd.DataFrame([{
-            'timestamp': datetime.now(),
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             'log_type': log_type,
             'message': message
         }])
-        existing = pd.read_csv(LOGS_CSV) if LOGS_CSV.exists() else pd.DataFrame()
-        updated = pd.concat([existing, new_entry], ignore_index=True)
+        
+        if LOGS_CSV.exists():
+            existing = pd.read_csv(LOGS_CSV)
+            updated = pd.concat([existing, new_entry], ignore_index=True)
+        else:
+            updated = new_entry
+        
         updated.to_csv(LOGS_CSV, index=False)
+        
+        # Keep only last 1000 logs
         if len(updated) > 1000:
             updated.tail(1000).to_csv(LOGS_CSV, index=False)
     except Exception as e:
         print(f"Log error: {e}")
 
+def save_classified_metrics(data, prediction, probability):
+    """Save metrics to CSV file - FIXED VERSION"""
+    if not data or data['network_score'] == 0:
+        return False
+    
+    try:
+        # Create new record
+        new_record = pd.DataFrame([{
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'google_latency': data['google_latency'],
+            'google_packet_loss': data['google_packet_loss'],
+            'google_bandwidth': data['google_bandwidth'],
+            'google_quality': data['google_quality'],
+            'youtube_latency': data['youtube_latency'],
+            'youtube_packet_loss': data['youtube_packet_loss'],
+            'youtube_bandwidth': data['youtube_bandwidth'],
+            'youtube_quality': data['youtube_quality'],
+            'combined_speed': data['combined_speed'],
+            'network_score': data['network_score'],
+            'network_status': data['network_status'],
+            'congestion_prediction': prediction if prediction is not None else 0,
+            'prediction_probability': probability if probability is not None else 0.0,
+            'test_mode': st.session_state.test_mode
+        }])
+        
+        # Append to existing CSV or create new
+        if METRICS_CSV.exists():
+            existing = pd.read_csv(METRICS_CSV)
+            updated = pd.concat([existing, new_record], ignore_index=True)
+        else:
+            updated = new_record
+        
+        updated.to_csv(METRICS_CSV, index=False)
+        st.session_state.db_write_count += 1
+        st.session_state.last_database_save = datetime.now()
+        
+        # Save recommendations
+        for rec in generate_recommendations(data):
+            rec_record = pd.DataFrame([{
+                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'service': rec['service'],
+                'recommendation': rec['message'],
+                'severity': rec['severity'],
+                'network_score': data['network_score'],
+                'network_status': data['network_status']
+            }])
+            
+            if RECOMMENDATIONS_CSV.exists():
+                existing_recs = pd.read_csv(RECOMMENDATIONS_CSV)
+                updated_recs = pd.concat([existing_recs, rec_record], ignore_index=True)
+            else:
+                updated_recs = rec_record
+            
+            updated_recs.to_csv(RECOMMENDATIONS_CSV, index=False)
+        
+        add_log_entry("INFO", f"Saved record #{st.session_state.db_write_count}: Score={data['network_score']:.1f}")
+        return True
+        
+    except Exception as e:
+        add_log_entry("ERROR", f"Failed to save metrics: {str(e)}")
+        return False
+
+def load_historical_data(limit=100):
+    """Load historical metrics from CSV"""
+    try:
+        if METRICS_CSV.exists():
+            df = pd.read_csv(METRICS_CSV)
+            if not df.empty:
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+                df = df.sort_values('timestamp', ascending=False)
+                return df.head(limit)
+        return pd.DataFrame()
+    except Exception as e:
+        return pd.DataFrame()
+
+def load_recommendations_history(limit=50):
+    """Load recommendations from CSV"""
+    try:
+        if RECOMMENDATIONS_CSV.exists():
+            df = pd.read_csv(RECOMMENDATIONS_CSV)
+            if not df.empty:
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+                df = df.sort_values('timestamp', ascending=False)
+                return df.head(limit)
+        return pd.DataFrame()
+    except Exception as e:
+        return pd.DataFrame()
+
+def load_system_logs(limit=100):
+    """Load system logs from CSV"""
+    try:
+        if LOGS_CSV.exists():
+            df = pd.read_csv(LOGS_CSV)
+            if not df.empty:
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+                df = df.sort_values('timestamp', ascending=False)
+                return df.head(limit)
+        return pd.DataFrame()
+    except Exception as e:
+        return pd.DataFrame()
+
+def get_data_stats():
+    """Get statistics about stored data"""
+    stats = {'total_records': 0, 'date_range': None, 'avg_score': 0, 'last_update': None}
+    try:
+        if METRICS_CSV.exists():
+            df = pd.read_csv(METRICS_CSV)
+            if not df.empty:
+                stats['total_records'] = len(df)
+                stats['avg_score'] = df['network_score'].mean()
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+                stats['date_range'] = f"{df['timestamp'].min().strftime('%Y-%m-%d')} to {df['timestamp'].max().strftime('%Y-%m-%d')}"
+                stats['last_update'] = df['timestamp'].max()
+    except Exception as e:
+        print(f"Stats error: {e}")
+    return stats
+
+def generate_recommendations(data):
+    """Generate recommendations based on data"""
+    recs = []
+    if data['youtube_quality'] < data['google_quality'] - 20:
+        recs.append({'service': 'Comparison', 'message': f"YouTube ({data['youtube_quality']}/100) worse than Google", 'severity': 'warning'})
+    elif data['google_quality'] < data['youtube_quality'] - 20:
+        recs.append({'service': 'Comparison', 'message': f"Google ({data['google_quality']}/100) worse than YouTube", 'severity': 'warning'})
+    
+    for svc, key in [('Google', 'google'), ('YouTube', 'youtube')]:
+        q = data[f'{key}_quality']
+        if q < 40:
+            recs.append({'service': svc, 'message': f"CRITICAL — {svc} degraded ({q}/100)", 'severity': 'critical'})
+        elif q < 60:
+            recs.append({'service': svc, 'message': f"DEGRADED — {svc} below threshold ({q}/100)", 'severity': 'warning'})
+        elif q >= 80:
+            recs.append({'service': svc, 'message': f"OPTIMAL — {svc} nominal ({q}/100)", 'severity': 'good'})
+    
+    if data['network_score'] < 50:
+        recs.append({'service': 'Network', 'message': f"Network critical ({data['network_score']:.0f}/100)", 'severity': 'critical'})
+    elif data['combined_speed'] < 30:
+        recs.append({'service': 'Network', 'message': f"Low bandwidth ({data['combined_speed']:.1f} Mbps)", 'severity': 'warning'})
+    return recs
+
 # -------------------------
-# Load ML Model - Silent version (no UI messages)
+# Load ML Model - Silent version
 # -------------------------
 @st.cache_resource
 def download_model_from_github():
@@ -367,138 +495,6 @@ def format_time_diff(s):
     elif s < 3600: return f"{int(s/60)}m ago"
     elif s < 86400: return f"{int(s/3600)}h ago"
     else: return f"{int(s/86400)}d ago"
-
-def generate_recommendations(data):
-    recs = []
-    if data['youtube_quality'] < data['google_quality'] - 20:
-        recs.append({'service': 'Comparison', 'message': f"YouTube ({data['youtube_quality']}/100) worse than Google", 'severity': 'warning'})
-    elif data['google_quality'] < data['youtube_quality'] - 20:
-        recs.append({'service': 'Comparison', 'message': f"Google ({data['google_quality']}/100) worse than YouTube", 'severity': 'warning'})
-    
-    for svc, key in [('Google', 'google'), ('YouTube', 'youtube')]:
-        q = data[f'{key}_quality']
-        if q < 40:
-            recs.append({'service': svc, 'message': f"CRITICAL — {svc} degraded ({q}/100)", 'severity': 'critical'})
-        elif q < 60:
-            recs.append({'service': svc, 'message': f"DEGRADED — {svc} below threshold ({q}/100)", 'severity': 'warning'})
-        elif q >= 80:
-            recs.append({'service': svc, 'message': f"OPTIMAL — {svc} nominal ({q}/100)", 'severity': 'good'})
-    
-    if data['network_score'] < 50:
-        recs.append({'service': 'Network', 'message': f"Network critical ({data['network_score']:.0f}/100)", 'severity': 'critical'})
-    elif data['combined_speed'] < 30:
-        recs.append({'service': 'Network', 'message': f"Low bandwidth ({data['combined_speed']:.1f} Mbps)", 'severity': 'warning'})
-    return recs
-
-# -------------------------
-# Save Functions
-# -------------------------
-def save_classified_metrics(data, prediction, probability):
-    """Save metrics to CSV file"""
-    if not data or data['network_score'] == 0:
-        return False
-    
-    try:
-        new_record = pd.DataFrame([{
-            'timestamp': datetime.now(),
-            'google_latency': data['google_latency'],
-            'google_packet_loss': data['google_packet_loss'],
-            'google_bandwidth': data['google_bandwidth'],
-            'google_quality': data['google_quality'],
-            'youtube_latency': data['youtube_latency'],
-            'youtube_packet_loss': data['youtube_packet_loss'],
-            'youtube_bandwidth': data['youtube_bandwidth'],
-            'youtube_quality': data['youtube_quality'],
-            'combined_speed': data['combined_speed'],
-            'network_score': data['network_score'],
-            'network_status': data['network_status'],
-            'congestion_prediction': prediction if prediction is not None else 0,
-            'prediction_probability': probability if probability is not None else 0.0,
-            'test_mode': st.session_state.test_mode
-        }])
-        
-        existing = pd.read_csv(METRICS_CSV) if METRICS_CSV.exists() else pd.DataFrame()
-        if not existing.empty:
-            last_record = existing.iloc[-1]
-            time_diff = (datetime.now() - pd.to_datetime(last_record['timestamp'])).total_seconds()
-            if time_diff < 30 and abs(last_record['network_score'] - data['network_score']) < 5:
-                return False
-        
-        updated = pd.concat([existing, new_record], ignore_index=True) if METRICS_CSV.exists() else new_record
-        updated.to_csv(METRICS_CSV, index=False)
-        
-        for rec in generate_recommendations(data):
-            rec_record = pd.DataFrame([{
-                'timestamp': datetime.now(),
-                'service': rec['service'],
-                'recommendation': rec['message'],
-                'severity': rec['severity'],
-                'network_score': data['network_score'],
-                'network_status': data['network_status']
-            }])
-            existing_recs = pd.read_csv(RECOMMENDATIONS_CSV) if RECOMMENDATIONS_CSV.exists() else pd.DataFrame()
-            updated_recs = pd.concat([existing_recs, rec_record], ignore_index=True)
-            updated_recs.to_csv(RECOMMENDATIONS_CSV, index=False)
-        
-        st.session_state.db_write_count += 1
-        st.session_state.last_database_save = datetime.now()
-        return True
-        
-    except Exception as e:
-        add_log_entry("ERROR", f"Failed to save metrics: {str(e)}")
-        return False
-
-def load_historical_data(limit=100):
-    """Load historical metrics from CSV"""
-    try:
-        if METRICS_CSV.exists():
-            df = pd.read_csv(METRICS_CSV)
-            if not df.empty:
-                df['timestamp'] = pd.to_datetime(df['timestamp'])
-                df = df.sort_values('timestamp', ascending=False)
-                return df.head(limit)
-        return pd.DataFrame()
-    except Exception as e:
-        return pd.DataFrame()
-
-def load_recommendations_history(limit=50):
-    """Load recommendations from CSV"""
-    try:
-        if RECOMMENDATIONS_CSV.exists():
-            df = pd.read_csv(RECOMMENDATIONS_CSV)
-            if not df.empty:
-                df['timestamp'] = pd.to_datetime(df['timestamp'])
-                df = df.sort_values('timestamp', ascending=False)
-                return df.head(limit)
-        return pd.DataFrame()
-    except Exception as e:
-        return pd.DataFrame()
-
-def load_system_logs(limit=100):
-    """Load system logs from CSV"""
-    try:
-        if LOGS_CSV.exists():
-            df = pd.read_csv(LOGS_CSV)
-            if not df.empty:
-                df['timestamp'] = pd.to_datetime(df['timestamp'])
-                df = df.sort_values('timestamp', ascending=False)
-                return df.head(limit)
-        return pd.DataFrame()
-    except Exception as e:
-        return pd.DataFrame()
-
-def get_data_stats():
-    """Get statistics about stored data"""
-    stats = {'total_records': 0, 'date_range': None, 'avg_score': 0, 'last_update': None}
-    if METRICS_CSV.exists():
-        df = pd.read_csv(METRICS_CSV)
-        if not df.empty:
-            stats['total_records'] = len(df)
-            stats['avg_score'] = df['network_score'].mean()
-            df['timestamp'] = pd.to_datetime(df['timestamp'])
-            stats['date_range'] = f"{df['timestamp'].min().strftime('%Y-%m-%d')} to {df['timestamp'].max().strftime('%Y-%m-%d')}"
-            stats['last_update'] = df['timestamp'].max()
-    return stats
 
 # -------------------------
 # ESP8266 Functions
@@ -752,9 +748,13 @@ def refresh_data():
             st.session_state.pulse_triggered = True
             check_and_send_alerts(data, prediction, probability)
         
+        # Save to CSV on every refresh (no duplicate check)
         time_since_save = (datetime.now() - st.session_state.last_database_save).total_seconds()
         if time_since_save >= DATABASE_SAVE_INTERVAL:
-            save_classified_metrics(data, prediction if prediction is not None else 0, probability if probability is not None else 0.0)
+            saved = save_classified_metrics(data, prediction if prediction is not None else 0, probability if probability is not None else 0.0)
+            if saved:
+                add_log_entry("INFO", f"Auto-saved record (Score: {data['network_score']:.1f})")
+        
         return True
     return False
 
@@ -1105,6 +1105,7 @@ def main():
     pulse_class = "data-updated" if st.session_state.pulse_triggered else ""
     st.session_state.pulse_triggered = False
     
+    # Force refresh stats on every render
     stats = get_data_stats()
     
     # Try to load model on startup (silently)
@@ -1535,7 +1536,7 @@ def main():
             csv = hist.to_csv(index=False)
             st.download_button("📥 Export CSV", csv, "netpulse_data.csv", "text/csv")
         else:
-            st.info("No historical data yet")
+            st.info("No historical data yet. Data will save automatically when ThingSpeak provides readings.")
 
     # TAB 3 - DIAGNOSTICS
     with tab3:
