@@ -1,0 +1,3 @@
+EMAIL_SENDER=offliqz@gmail.com
+EMAIL_PASSWORD=lkid xdce bpls xvtw
+EMAIL_RECIPIENT=ndahabonimanadaniel13@gmail.com
