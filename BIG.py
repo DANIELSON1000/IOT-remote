@@ -20,6 +20,7 @@ import socket
 import os
 from pathlib import Path
 import urllib.request
+import time
 
 # -------------------------
 # Page Configuration
@@ -131,32 +132,36 @@ for key, val in {
         st.session_state[key] = val
 
 # -------------------------
-# Load ML Model - Enhanced with GitHub fallback
+# Load ML Model - From GitHub
 # -------------------------
 @st.cache_resource
 def download_model_from_github():
-    """Attempt to download the model from GitHub if not found locally"""
+    """Download the model from GitHub"""
+    # Your GitHub raw URL - UPDATED FOR DANIELSON1000/IOT-remote
     model_urls = [
-        "https://raw.githubusercontent.com/yourusername/yourrepo/main/network_congestion_model.pkl",
-        "https://github.com/yourusername/yourrepo/raw/main/network_congestion_model.pkl",
-        # Add your actual GitHub raw URL here
+        "https://raw.githubusercontent.com/DANIELSON1000/IOT-remote/main/network_congestion_model.pkl",
+        "https://github.com/DANIELSON1000/IOT-remote/raw/main/network_congestion_model.pkl",
     ]
     
     for url in model_urls:
         try:
-            st.info(f"Attempting to download model from: {url}")
-            response = requests.get(url, timeout=10)
+            st.info(f"📥 Downloading model from GitHub...")
+            response = requests.get(url, timeout=15)
             if response.status_code == 200:
                 with open("network_congestion_model.pkl", "wb") as f:
                     f.write(response.content)
+                st.success("✅ Model downloaded successfully!")
                 return True
-        except:
+            else:
+                st.warning(f"Failed to download from {url} (Status: {response.status_code})")
+        except Exception as e:
+            st.warning(f"Error downloading from {url}: {str(e)}")
             continue
     return False
 
 @st.cache_resource
 def load_congestion_model():
-    """Load the pre-trained Random Forest model with fallback"""
+    """Load the pre-trained Random Forest model"""
     model_path = Path("network_congestion_model.pkl")
     
     # Check if model exists locally
@@ -165,24 +170,27 @@ def load_congestion_model():
             model = joblib.load(model_path)
             st.session_state.model_loaded = True
             st.session_state.model_error = None
+            add_log_entry("INFO", "ML model loaded from local file")
             return model
         except Exception as e:
             st.session_state.model_error = str(e)
+            st.warning(f"Error loading local model: {str(e)}")
     
-    # If not, try to download from GitHub
-    st.warning("⚠️ Model file not found locally. Attempting to download from GitHub...")
+    # Try to download from GitHub
+    st.info("🔍 Model not found locally. Attempting to download from GitHub...")
     if download_model_from_github():
         try:
             model = joblib.load(model_path)
             st.session_state.model_loaded = True
             st.session_state.model_error = None
-            add_log_entry("INFO", "Model downloaded and loaded successfully")
+            add_log_entry("INFO", "ML model downloaded and loaded from GitHub")
             return model
         except Exception as e:
             st.session_state.model_error = str(e)
+            st.warning(f"Error loading downloaded model: {str(e)}")
     
-    # If still failing, create a simple rule-based model
-    st.warning("⚠️ Could not load ML model. Using rule-based congestion detection.")
+    # Fallback to rule-based
+    st.warning("⚠️ Using rule-based congestion detection (ML model unavailable)")
     add_log_entry("WARNING", "ML model unavailable - using rule-based detection")
     st.session_state.model_loaded = False
     return None
@@ -258,7 +266,6 @@ def predict_congestion(google_latency, google_packet_loss, google_bandwidth,
             return prediction, probability
         except Exception as e:
             print(f"ML Prediction error: {str(e)}")
-            # Fall back to rule-based
             return predict_congestion_rule_based(
                 google_latency, google_packet_loss, google_bandwidth,
                 youtube_latency, youtube_packet_loss, youtube_bandwidth
@@ -477,42 +484,72 @@ def get_data_stats():
     return stats
 
 # -------------------------
-# ESP8266 Functions
+# ESP8266 Functions - IMPROVED
 # -------------------------
 def test_esp_connection(ip):
-    """Test connection to ESP8266"""
+    """Test connection to ESP8266 with better error handling"""
+    if not ip:
+        return False, "No IP address provided"
+    
+    # Try different common ports
+    ports_to_try = [80, 8080, 5000]
+    
+    for port in ports_to_try:
+        try:
+            url = f"http://{ip}:{port}/status"
+            response = requests.get(url, timeout=3)
+            if response.status_code == 200:
+                return True, f"Connected on port {port}"
+            elif response.status_code == 404:
+                # Server exists but endpoint not found
+                return True, f"ESP reachable (port {port}) - Check endpoint"
+        except requests.exceptions.ConnectionError:
+            continue
+        except requests.exceptions.Timeout:
+            continue
+        except Exception:
+            continue
+    
+    # Try ping-like check using socket
     try:
-        url = f"http://{ip}:{ESP8266_PORT}/status"
-        response = requests.get(url, timeout=2)
-        if response.status_code == 200:
-            return True, response.text
-        return False, f"HTTP {response.status_code}"
-    except requests.exceptions.ConnectionError:
-        return False, "Connection refused - Check IP and that ESP is powered"
-    except requests.exceptions.Timeout:
-        return False, "Timeout - ESP not responding"
-    except Exception as e:
-        return False, str(e)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(2)
+        result = sock.connect_ex((ip, 80))
+        sock.close()
+        if result == 0:
+            return False, "ESP reachable but not responding to HTTP. Check if ESP web server is running."
+        else:
+            return False, f"Cannot reach {ip}. Check: 1) ESP powered on 2) Same WiFi 3) Correct IP"
+    except:
+        return False, f"Cannot reach {ip}. Verify ESP is on and connected."
 
 def send_esp_command(command_endpoint):
     """Send command to ESP8266"""
     if not st.session_state.esp_ip:
-        return False, "No ESP8266 IP configured"
+        return False, "No ESP8266 IP configured. Click CONNECT first."
     
+    # Test connection first
     success, msg = test_esp_connection(st.session_state.esp_ip)
     if not success:
         st.session_state.esp_status = 'disconnected'
         return False, f"ESP offline: {msg}"
     
     try:
-        url = f"http://{st.session_state.esp_ip}:{ESP8266_PORT}{command_endpoint}"
+        url = f"http://{st.session_state.esp_ip}:80{command_endpoint}"
         response = requests.get(url, timeout=3)
+        
         if response.status_code == 200:
             st.session_state.esp_status = 'connected'
             st.session_state.esp_last_seen = datetime.now()
+            add_log_entry('INFO', f'ESP command: {command_endpoint}')
             return True, response.text
         else:
-            return False, f"Error: {response.status_code}"
+            return False, f"HTTP {response.status_code}"
+            
+    except requests.exceptions.ConnectionError:
+        return False, "Connection refused"
+    except requests.exceptions.Timeout:
+        return False, "Timeout - ESP not responding"
     except Exception as e:
         st.session_state.esp_status = 'error'
         return False, str(e)
@@ -1063,8 +1100,15 @@ def main():
     
     stats = get_data_stats()
     
+    # Try to load model on startup
+    if st.session_state.model_loaded is False and st.session_state.model_error is None:
+        load_congestion_model()
+    
     # Show model status in header badge
-    model_status = "🤖 AI ACTIVE" if st.session_state.model_loaded else "⚠️ AI FALLBACK MODE"
+    if st.session_state.model_loaded:
+        model_status = "🤖 AI ACTIVE"
+    else:
+        model_status = "⚠️ RULE-BASED MODE"
 
     # Header
     st.markdown(f"""
@@ -1075,7 +1119,7 @@ def main():
             <span class="pulse-dot"></span>
             LIVE · UPDATE #{st.session_state.update_count}
             {(' · 🧪 TEST MODE' if st.session_state.test_mode else '')}
-            {' · ' + model_status if load_congestion_model() is not None or not st.session_state.model_loaded else ''}
+            {' · ' + model_status}
             <span style="margin-left: 12px;">💾 RECORDS: {stats['total_records']}</span>
         </div>
     </div>
@@ -1129,14 +1173,14 @@ def main():
         with col_ip2:
             if st.button("🔌 CONNECT", use_container_width=True, key="connect_esp"):
                 if st.session_state.esp_manual_ip:
-                    with st.spinner("Connecting..."):
+                    with st.spinner(f"Connecting to {st.session_state.esp_manual_ip}..."):
                         success, msg = test_esp_connection(st.session_state.esp_manual_ip)
                         if success:
                             st.session_state.esp_ip = st.session_state.esp_manual_ip
                             st.session_state.esp_status = 'connected'
                             st.session_state.esp_last_seen = datetime.now()
                             add_log_entry('INFO', f'ESP connected to {st.session_state.esp_manual_ip}')
-                            st.success("✅ Connected!")
+                            st.success(f"✅ Connected! {msg}")
                             st.rerun()
                         else:
                             st.session_state.esp_status = 'disconnected'
@@ -1158,11 +1202,12 @@ def main():
                 col_test, col_clear = st.columns(2)
                 with col_test:
                     if st.button("🔄 TEST", use_container_width=True):
-                        success, msg = test_esp_connection(st.session_state.esp_ip)
-                        if success:
-                            st.success("✅ Online")
-                        else:
-                            st.error(f"❌ {msg}")
+                        with st.spinner("Testing..."):
+                            success, msg = test_esp_connection(st.session_state.esp_ip)
+                            if success:
+                                st.success(f"✅ {msg}")
+                            else:
+                                st.error(f"❌ {msg}")
                 with col_clear:
                     if st.button("🗑 CLEAR", use_container_width=True):
                         st.session_state.esp_ip = None
@@ -1198,41 +1243,45 @@ def main():
             c1, c2 = st.columns(2)
             with c1:
                 if st.button("🎬 YouTube", use_container_width=True):
-                    success, msg = apply_test_scenario('youtube_degraded')
-                    if success:
-                        st.success("✅ YouTube test active")
-                        refresh_data()
-                        st.rerun()
-                    else:
-                        st.error(f"❌ {msg}")
+                    with st.spinner("Sending command..."):
+                        success, msg = apply_test_scenario('youtube_degraded')
+                        if success:
+                            st.success("✅ YouTube test active")
+                            refresh_data()
+                            st.rerun()
+                        else:
+                            st.error(f"❌ {msg}")
                 
                 if st.button("🔍 Google", use_container_width=True):
-                    success, msg = apply_test_scenario('google_degraded')
-                    if success:
-                        st.success("✅ Google test active")
-                        refresh_data()
-                        st.rerun()
-                    else:
-                        st.error(f"❌ {msg}")
+                    with st.spinner("Sending command..."):
+                        success, msg = apply_test_scenario('google_degraded')
+                        if success:
+                            st.success("✅ Google test active")
+                            refresh_data()
+                            st.rerun()
+                        else:
+                            st.error(f"❌ {msg}")
             
             with c2:
                 if st.button("⚠️ Both", use_container_width=True):
-                    success, msg = apply_test_scenario('both_degraded')
-                    if success:
-                        st.success("✅ Both test active")
-                        refresh_data()
-                        st.rerun()
-                    else:
-                        st.error(f"❌ {msg}")
+                    with st.spinner("Sending command..."):
+                        success, msg = apply_test_scenario('both_degraded')
+                        if success:
+                            st.success("✅ Both test active")
+                            refresh_data()
+                            st.rerun()
+                        else:
+                            st.error(f"❌ {msg}")
                 
                 if st.button("✅ Normal", use_container_width=True):
-                    success, msg = apply_test_scenario('recovery')
-                    if success:
-                        st.success("✅ Normal mode restored")
-                        refresh_data()
-                        st.rerun()
-                    else:
-                        st.error(f"❌ {msg}")
+                    with st.spinner("Sending command..."):
+                        success, msg = apply_test_scenario('recovery')
+                        if success:
+                            st.success("✅ Normal mode restored")
+                            refresh_data()
+                            st.rerun()
+                        else:
+                            st.error(f"❌ {msg}")
 
         st.markdown('<div class="cyber-divider"></div>', unsafe_allow_html=True)
 
@@ -1251,6 +1300,7 @@ def main():
                 if success:
                     send_email_notification("Test", "<div class='good'>✅ Test OK</div>", "test")
                     st.success("Test email sent!")
+                    add_log_entry("INFO", "Test email sent")
                 else:
                     st.error(f"❌ {msg}")
 
