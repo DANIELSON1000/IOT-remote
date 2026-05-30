@@ -665,7 +665,7 @@ def fetch_thingspeak_data():
     """Fetch latest data from ThingSpeak"""
     try:
         CHANNEL_ID = "3381959"
-        READ_API_KEY = "8F8XKE0PABJFF6GG"
+        READ_API_KEY = "KEDVMMNSFKU34SAB"
         url = f"http://api.thingspeak.com/channels/{CHANNEL_ID}/feeds.json?api_key={READ_API_KEY}&results=1"
         response = requests.get(url, timeout=5)
         response.raise_for_status()
