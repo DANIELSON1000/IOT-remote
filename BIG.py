@@ -31,7 +31,7 @@ warnings.filterwarnings('ignore')
 # Page Configuration
 # -------------------------
 st.set_page_config(
-    page_title="NetPulse AI Monitor",
+    page_title="ESP8266 NETWORK MONITOR SYSTEM ",
     page_icon="🛰️",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -619,7 +619,7 @@ def send_email_notification(subject, body, alert_type="general"):
         </style></head>
         <body>
         <div class="container">
-        <h2>🛰 NetPulse Alert</h2>
+        <h2>🛰 ESP8266 NETWORK MONITOR SYSTEM online</h2>
         <hr/>
         {body}
         <hr/>
@@ -1121,7 +1121,7 @@ def main():
     # Header
     st.markdown(f"""
     <div class="netpulse-header {pulse_class}">
-        <div class="header-title">🛰 NETPULSE AI MONITOR</div>
+        <div class="header-title">🛰 ESP8266 NETWORK MONITOR SYSTEM</div>
         <div class="header-sub">GOOGLE & YOUTUBE · THINGSPEAK LIVE · AI CONGESTION PREDICTION · ESP8266 CONTROL</div>
         <div class="header-badge">
             <span class="pulse-dot"></span>
