@@ -6,3 +6,7 @@ timestamp,service,recommendation,severity,network_score,network_status
 2026-05-31 16:18:28,Google,OPTIMAL — Google nominal (80/100),good,79.0,GOOD
 2026-05-31 16:18:28,YouTube,OPTIMAL — YouTube nominal (83/100),good,79.0,GOOD
 2026-05-31 16:19:54,YouTube,OPTIMAL — YouTube nominal (82/100),good,79.0,GOOD
+2026-05-31 16:21:36,Comparison,YouTube (8/100) worse than Google,warning,66.8,GOOD
+2026-05-31 16:21:36,YouTube,CRITICAL — YouTube degraded (8/100),critical,66.8,GOOD
+2026-05-31 16:21:49,Comparison,YouTube (8/100) worse than Google,warning,66.8,GOOD
+2026-05-31 16:21:49,YouTube,CRITICAL — YouTube degraded (8/100),critical,66.8,GOOD
