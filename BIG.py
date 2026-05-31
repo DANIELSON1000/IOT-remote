@@ -64,12 +64,12 @@ EMAIL_CONFIG = {
     'recipient_email': 'ndahabonimanadaniel13@gmail.com'
 }
 
-# GitHub Configuration - YOU NEED TO SET THESE
+# GitHub Configuration
 GITHUB_CONFIG = {
-    'token': st.secrets.get("GITHUB_TOKEN", ""),  # Store in Streamlit secrets
-    'repo': 'DANIELSON1000/IOT-remote',  # Your GitHub repo
+    'token': st.secrets.get("GITHUB_TOKEN", "") if hasattr(st, 'secrets') else "",
+    'repo': 'DANIELSON1000/IOT-remote',
     'branch': 'main',
-    'data_folder': 'network_data'  # Folder in repo to store CSV files
+    'data_folder': 'network_data'
 }
 
 NOTIFICATION_COOLDOWN = 300
@@ -96,12 +96,52 @@ RECOMMENDATIONS_CSV = DATA_DIR / "recommendations.csv"
 LOGS_CSV = DATA_DIR / "system_logs.csv"
 
 # -------------------------
+# Session State Initialization - MUST RUN FIRST
+# -------------------------
+def init_session_state():
+    """Initialize all session state variables"""
+    defaults = {
+        'last_refresh': datetime.now(),
+        'auto_refresh': True,
+        'data': None,
+        'prev_data': None,
+        'time_diff': 0,
+        'last_update': None,
+        'status': "offline",
+        'last_database_save': datetime.now(),
+        'pulse_triggered': False,
+        'update_count': 0,
+        'last_notification_sent': {},
+        'email_configured': False,
+        'test_mode': False,
+        'test_scenario': None,
+        'esp_ip': None,
+        'esp_status': 'disconnected',
+        'esp_last_seen': None,
+        'esp_manual_ip': '',
+        'use_manual_ip': True,
+        'prediction': None,
+        'prediction_probability': None,
+        'db_write_count': 0,
+        'model_loaded': False,
+        'model_error': None,
+        'model_download_attempted': False,
+        'github_synced': False
+    }
+    
+    for key, val in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = val
+
+# Initialize session state immediately
+init_session_state()
+
+# -------------------------
 # GitHub Storage Functions
 # -------------------------
 def upload_to_github(file_path, content, commit_message):
     """Upload a file to GitHub repository"""
     if not GITHUB_CONFIG['token']:
-        st.warning("⚠️ GitHub token not configured. Data saved locally only.")
         return False
     
     # Construct GitHub API URL
@@ -1215,17 +1255,24 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -------------------------
-# Auto Refresh Setup
+# Auto Refresh Setup - WITH SAFETY CHECK
 # -------------------------
-now = datetime.now()
-since_refresh = (now - st.session_state.last_refresh).total_seconds()
-next_refresh = max(0, REFRESH_INTERVAL - since_refresh)
-since_save = (now - st.session_state.last_database_save).total_seconds()
-time_until_save = max(0, DATABASE_SAVE_INTERVAL - since_save)
-
-if since_refresh >= REFRESH_INTERVAL and st.session_state.auto_refresh:
-    refresh_data()
-    st.rerun()
+# Ensure session state has all required keys before calculating
+if 'last_refresh' in st.session_state and 'last_database_save' in st.session_state:
+    now = datetime.now()
+    since_refresh = (now - st.session_state.last_refresh).total_seconds()
+    next_refresh = max(0, REFRESH_INTERVAL - since_refresh)
+    since_save = (now - st.session_state.last_database_save).total_seconds()
+    time_until_save = max(0, DATABASE_SAVE_INTERVAL - since_save)
+    
+    if since_refresh >= REFRESH_INTERVAL and st.session_state.auto_refresh:
+        refresh_data()
+        st.rerun()
+else:
+    # Initialize if missing (shouldn't happen due to init_session_state, but just in case)
+    init_session_state()
+    next_refresh = REFRESH_INTERVAL
+    time_until_save = DATABASE_SAVE_INTERVAL
 
 # -------------------------
 # MAIN APP
@@ -1474,8 +1521,8 @@ def main():
 
         st.markdown('<div class="cyber-divider"></div>', unsafe_allow_html=True)
 
-        # Timers
-        if st.session_state.auto_refresh:
+        # Timers - only show if auto_refresh is enabled
+        if st.session_state.auto_refresh and 'next_refresh' in locals():
             st.markdown(f"""
             <div class="sidebar-stat">
                 <span class="sidebar-stat-label">⏱ NEXT UPDATE</span>
@@ -1660,7 +1707,7 @@ def main():
         if GITHUB_CONFIG['token']:
             col_sync1, col_sync2 = st.columns([3, 1])
             with col_sync2:
-                if st.button("🔄 Sync with GitHub", use_container_width=True):
+                if st.button("🔄 Sync from GitHub", use_container_width=True):
                     with st.spinner("Syncing from GitHub..."):
                         if sync_with_github():
                             st.success("✅ Synced from GitHub!")
