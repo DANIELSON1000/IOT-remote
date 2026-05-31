@@ -10,3 +10,9 @@ timestamp,service,recommendation,severity,network_score,network_status
 2026-05-31 16:21:36,YouTube,CRITICAL — YouTube degraded (8/100),critical,66.8,GOOD
 2026-05-31 16:21:49,Comparison,YouTube (8/100) worse than Google,warning,66.8,GOOD
 2026-05-31 16:21:49,YouTube,CRITICAL — YouTube degraded (8/100),critical,66.8,GOOD
+2026-05-31 16:22:04,Comparison,YouTube (8/100) worse than Google,warning,66.8,GOOD
+2026-05-31 16:22:04,YouTube,CRITICAL — YouTube degraded (8/100),critical,66.8,GOOD
+2026-05-31 16:22:24,Comparison,YouTube (8/100) worse than Google,warning,66.8,GOOD
+2026-05-31 16:22:24,YouTube,CRITICAL — YouTube degraded (8/100),critical,66.8,GOOD
+2026-05-31 16:22:32,Comparison,YouTube (8/100) worse than Google,warning,66.8,GOOD
+2026-05-31 16:22:32,YouTube,CRITICAL — YouTube degraded (8/100),critical,66.8,GOOD
