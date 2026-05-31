@@ -3,3 +3,5 @@ timestamp,google_latency,google_packet_loss,google_bandwidth,google_quality,yout
 2026-05-31 16:17:36,66.5,0.0,100.0,78,69.0,0.0,100.0,100,100.0,79.0,GOOD,0,0.61,False,disconnected,streamlit_app
 2026-05-31 16:18:28,61.8,0.0,100.0,80,72.7,0.0,100.0,83,100.0,79.0,GOOD,0,0.6,False,disconnected,streamlit_app
 2026-05-31 16:19:54,77.7,0.0,100.0,75,78.7,0.0,100.0,82,100.0,79.0,GOOD,0,0.59,False,disconnected,streamlit_app
+2026-05-31 16:21:36,69.2,0.0,100.0,77,200.0,8.0,5.0,8,52.5,66.8,GOOD,1,1.0,False,disconnected,streamlit_app
+2026-05-31 16:21:49,69.2,0.0,100.0,77,200.0,8.0,5.0,8,52.5,66.8,GOOD,1,1.0,False,disconnected,streamlit_app
