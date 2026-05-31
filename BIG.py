@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-NetPulse AI Monitor - Complete Edition
-Features: ESP8266 Control + ML Congestion Prediction + CSV Storage
+NetPulse AI Monitor - Complete Edition with GitHub Storage
+Features: ESP8266 Control + ML Congestion Prediction + GitHub CSV Storage
 Cyberpunk UI with Live Animations & Email Notifications
 """
 
@@ -22,6 +22,8 @@ from pathlib import Path
 import urllib.request
 import time
 import sys
+import base64
+import json
 
 # Suppress warnings
 import warnings
@@ -31,7 +33,7 @@ warnings.filterwarnings('ignore')
 # Page Configuration
 # -------------------------
 st.set_page_config(
-    page_title="ESP8266 NETWORK MONITOR SYSTEM ",
+    page_title="ESP8266 NETWORK MONITOR SYSTEM",
     page_icon="🛰️",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -62,6 +64,14 @@ EMAIL_CONFIG = {
     'recipient_email': 'ndahabonimanadaniel13@gmail.com'
 }
 
+# GitHub Configuration - YOU NEED TO SET THESE
+GITHUB_CONFIG = {
+    'token': st.secrets.get("GITHUB_TOKEN", ""),  # Store in Streamlit secrets
+    'repo': 'DANIELSON1000/IOT-remote',  # Your GitHub repo
+    'branch': 'main',
+    'data_folder': 'network_data'  # Folder in repo to store CSV files
+}
+
 NOTIFICATION_COOLDOWN = 300
 ALERT_THRESHOLDS = {
     'critical_score': 40,
@@ -77,7 +87,7 @@ TEST_SCENARIOS = {
     'recovery': {'name': 'Normal Mode', 'description': 'Restore normal operation', 'esp_endpoint': '/test/reset'}
 }
 
-# CSV Storage Setup
+# CSV Storage Setup - Local cache
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 
@@ -86,43 +96,143 @@ RECOMMENDATIONS_CSV = DATA_DIR / "recommendations.csv"
 LOGS_CSV = DATA_DIR / "system_logs.csv"
 
 # -------------------------
-# Session State
+# GitHub Storage Functions
 # -------------------------
-for key, val in {
-    'last_refresh': datetime.now(),
-    'auto_refresh': True,
-    'data': None,
-    'prev_data': None,
-    'time_diff': 0,
-    'last_update': None,
-    'status': "offline",
-    'last_database_save': datetime.now(),
-    'pulse_triggered': False,
-    'update_count': 0,
-    'last_notification_sent': {},
-    'email_configured': False,
-    'test_mode': False,
-    'test_scenario': None,
-    'esp_ip': None,
-    'esp_status': 'disconnected',
-    'esp_last_seen': None,
-    'esp_manual_ip': '',
-    'use_manual_ip': True,
-    'prediction': None,
-    'prediction_probability': None,
-    'db_write_count': 0,
-    'model_loaded': False,
-    'model_error': None,
-    'model_download_attempted': False
-}.items():
-    if key not in st.session_state:
-        st.session_state[key] = val
+def upload_to_github(file_path, content, commit_message):
+    """Upload a file to GitHub repository"""
+    if not GITHUB_CONFIG['token']:
+        st.warning("⚠️ GitHub token not configured. Data saved locally only.")
+        return False
+    
+    # Construct GitHub API URL
+    api_url = f"https://api.github.com/repos/{GITHUB_CONFIG['repo']}/contents/{GITHUB_CONFIG['data_folder']}/{file_path}"
+    
+    # Encode content to base64
+    content_base64 = base64.b64encode(content.encode()).decode()
+    
+    # Prepare headers
+    headers = {
+        'Authorization': f'token {GITHUB_CONFIG["token"]}',
+        'Accept': 'application/vnd.github.v3+json'
+    }
+    
+    # Prepare data
+    data = {
+        'message': commit_message,
+        'content': content_base64,
+        'branch': GITHUB_CONFIG['branch']
+    }
+    
+    # Check if file already exists to get SHA
+    try:
+        response = requests.get(api_url, headers=headers)
+        if response.status_code == 200:
+            existing = response.json()
+            data['sha'] = existing['sha']
+    except:
+        pass
+    
+    # Upload/Update file
+    try:
+        response = requests.put(api_url, headers=headers, json=data)
+        if response.status_code in [200, 201]:
+            add_log_entry("INFO", f"Uploaded to GitHub: {file_path}")
+            return True
+        else:
+            add_log_entry("ERROR", f"GitHub upload failed: {response.status_code}")
+            return False
+    except Exception as e:
+        add_log_entry("ERROR", f"GitHub upload error: {str(e)}")
+        return False
+
+def download_from_github(file_path):
+    """Download a file from GitHub repository"""
+    if not GITHUB_CONFIG['token']:
+        return None
+    
+    api_url = f"https://api.github.com/repos/{GITHUB_CONFIG['repo']}/contents/{GITHUB_CONFIG['data_folder']}/{file_path}"
+    
+    headers = {
+        'Authorization': f'token {GITHUB_CONFIG["token"]}',
+        'Accept': 'application/vnd.github.v3+json'
+    }
+    
+    try:
+        response = requests.get(api_url, headers=headers)
+        if response.status_code == 200:
+            data = response.json()
+            content = base64.b64decode(data['content']).decode()
+            return content
+        return None
+    except:
+        return None
+
+def sync_with_github():
+    """Sync local CSV files with GitHub"""
+    if not GITHUB_CONFIG['token']:
+        return False
+    
+    # Download metrics from GitHub
+    metrics_content = download_from_github("network_metrics.csv")
+    if metrics_content:
+        with open(METRICS_CSV, 'w') as f:
+            f.write(metrics_content)
+        add_log_entry("INFO", "Synced metrics from GitHub")
+    
+    # Download recommendations from GitHub
+    recs_content = download_from_github("recommendations.csv")
+    if recs_content:
+        with open(RECOMMENDATIONS_CSV, 'w') as f:
+            f.write(recs_content)
+        add_log_entry("INFO", "Synced recommendations from GitHub")
+    
+    # Download logs from GitHub
+    logs_content = download_from_github("system_logs.csv")
+    if logs_content:
+        with open(LOGS_CSV, 'w') as f:
+            f.write(logs_content)
+        add_log_entry("INFO", "Synced logs from GitHub")
+    
+    return True
+
+def save_to_github_all():
+    """Save all CSV files to GitHub"""
+    if not GITHUB_CONFIG['token']:
+        return False
+    
+    success = True
+    
+    # Upload metrics
+    if METRICS_CSV.exists():
+        with open(METRICS_CSV, 'r') as f:
+            content = f.read()
+        if not upload_to_github("network_metrics.csv", content, f"Update metrics - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"):
+            success = False
+    
+    # Upload recommendations
+    if RECOMMENDATIONS_CSV.exists():
+        with open(RECOMMENDATIONS_CSV, 'r') as f:
+            content = f.read()
+        if not upload_to_github("recommendations.csv", content, f"Update recommendations - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"):
+            success = False
+    
+    # Upload logs
+    if LOGS_CSV.exists():
+        with open(LOGS_CSV, 'r') as f:
+            content = f.read()
+        if not upload_to_github("system_logs.csv", content, f"Update logs - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"):
+            success = False
+    
+    if success:
+        add_log_entry("INFO", "All files synced to GitHub successfully")
+    
+    return success
 
 # -------------------------
-# CSV Storage Functions
+# CSV Storage Functions (Modified for GitHub sync)
 # -------------------------
 def add_log_entry(log_type, message):
-    """Add entry to system logs CSV"""
+    """Add entry to system logs CSV and sync to GitHub"""
     try:
         new_entry = pd.DataFrame([{
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -138,14 +248,19 @@ def add_log_entry(log_type, message):
         
         updated.to_csv(LOGS_CSV, index=False)
         
-        # Keep only last 1000 logs
-        if len(updated) > 1000:
-            updated.tail(1000).to_csv(LOGS_CSV, index=False)
+        # Keep only last 2000 logs
+        if len(updated) > 2000:
+            updated.tail(2000).to_csv(LOGS_CSV, index=False)
+        
+        # Sync to GitHub every 10 logs or on errors
+        if st.session_state.db_write_count % 10 == 0 or log_type in ['ERROR', 'ALERT']:
+            save_to_github_all()
+            
     except Exception as e:
         print(f"Log error: {e}")
 
 def save_classified_metrics(data, prediction, probability):
-    """Save metrics to CSV file - FIXED VERSION"""
+    """Save metrics to CSV file and sync to GitHub"""
     if not data or data['network_score'] == 0:
         return False
     
@@ -166,7 +281,9 @@ def save_classified_metrics(data, prediction, probability):
             'network_status': data['network_status'],
             'congestion_prediction': prediction if prediction is not None else 0,
             'prediction_probability': probability if probability is not None else 0.0,
-            'test_mode': st.session_state.test_mode
+            'test_mode': st.session_state.test_mode,
+            'esp_status': st.session_state.esp_status,
+            'source': 'streamlit_app'
         }])
         
         # Append to existing CSV or create new
@@ -199,6 +316,10 @@ def save_classified_metrics(data, prediction, probability):
             
             updated_recs.to_csv(RECOMMENDATIONS_CSV, index=False)
         
+        # Sync to GitHub every 5 writes or on critical events
+        if st.session_state.db_write_count % 5 == 0 or data['network_score'] < 40:
+            save_to_github_all()
+        
         add_log_entry("INFO", f"Saved record #{st.session_state.db_write_count}: Score={data['network_score']:.1f}")
         return True
         
@@ -206,9 +327,14 @@ def save_classified_metrics(data, prediction, probability):
         add_log_entry("ERROR", f"Failed to save metrics: {str(e)}")
         return False
 
-def load_historical_data(limit=100):
-    """Load historical metrics from CSV"""
+def load_historical_data(limit=500):
+    """Load historical metrics from CSV (prefer GitHub if available)"""
     try:
+        # Try to sync from GitHub first
+        if GITHUB_CONFIG['token'] and st.session_state.get('github_synced', False) == False:
+            sync_with_github()
+            st.session_state.github_synced = True
+        
         if METRICS_CSV.exists():
             df = pd.read_csv(METRICS_CSV)
             if not df.empty:
@@ -217,9 +343,10 @@ def load_historical_data(limit=100):
                 return df.head(limit)
         return pd.DataFrame()
     except Exception as e:
+        add_log_entry("ERROR", f"Error loading metrics: {str(e)}")
         return pd.DataFrame()
 
-def load_recommendations_history(limit=50):
+def load_recommendations_history(limit=200):
     """Load recommendations from CSV"""
     try:
         if RECOMMENDATIONS_CSV.exists():
@@ -232,7 +359,7 @@ def load_recommendations_history(limit=50):
     except Exception as e:
         return pd.DataFrame()
 
-def load_system_logs(limit=100):
+def load_system_logs(limit=500):
     """Load system logs from CSV"""
     try:
         if LOGS_CSV.exists():
@@ -247,7 +374,7 @@ def load_system_logs(limit=100):
 
 def get_data_stats():
     """Get statistics about stored data"""
-    stats = {'total_records': 0, 'date_range': None, 'avg_score': 0, 'last_update': None}
+    stats = {'total_records': 0, 'date_range': None, 'avg_score': 0, 'last_update': None, 'github_connected': bool(GITHUB_CONFIG['token'])}
     try:
         if METRICS_CSV.exists():
             df = pd.read_csv(METRICS_CSV)
@@ -635,8 +762,10 @@ def send_email_notification(subject, body, alert_type="general"):
         server.send_message(msg)
         server.quit()
         st.session_state.last_notification_sent[alert_type] = datetime.now()
+        add_log_entry("ALERT", f"Email sent: {subject}")
         return True, "Sent"
     except Exception as e:
+        add_log_entry("ERROR", f"Email failed: {str(e)}")
         return False, str(e)
 
 def check_and_send_alerts(data, prediction, probability):
@@ -1117,17 +1246,21 @@ def main():
         model_status = "🤖 AI ACTIVE"
     else:
         model_status = "📊 RULE-BASED"
+    
+    # Show GitHub status
+    github_status = "📦 GITHUB SYNC" if GITHUB_CONFIG['token'] else "💾 LOCAL ONLY"
 
     # Header
     st.markdown(f"""
     <div class="netpulse-header {pulse_class}">
         <div class="header-title">🛰 ESP8266 NETWORK MONITOR SYSTEM</div>
-        <div class="header-sub">GOOGLE & YOUTUBE · THINGSPEAK LIVE · AI CONGESTION PREDICTION · ESP8266 CONTROL</div>
+        <div class="header-sub">GOOGLE & YOUTUBE · THINGSPEAK LIVE · AI CONGESTION PREDICTION · ESP8266 CONTROL · GITHUB STORAGE</div>
         <div class="header-badge">
             <span class="pulse-dot"></span>
             LIVE · UPDATE #{st.session_state.update_count}
             {(' · 🧪 TEST MODE' if st.session_state.test_mode else '')}
             {' · ' + model_status}
+            {' · ' + github_status}
             <span style="margin-left: 12px;">💾 RECORDS: {stats['total_records']}</span>
         </div>
     </div>
@@ -1153,6 +1286,33 @@ def main():
             if st.button("⟳", help="Refresh Now", use_container_width=True):
                 refresh_data()
                 st.rerun()
+
+        st.markdown('<div class="cyber-divider"></div>', unsafe_allow_html=True)
+
+        # GitHub Sync Section
+        st.markdown("""
+        <div style="font-family:'Orbitron',monospace; font-size:0.7rem; letter-spacing:0.15rem;
+             color:#00f5ff; margin-bottom:8px;">
+            📦 GITHUB STORAGE
+        </div>
+        """, unsafe_allow_html=True)
+        
+        if GITHUB_CONFIG['token']:
+            st.success("✅ GitHub Connected")
+            if st.button("🔄 MANUAL SYNC", use_container_width=True):
+                with st.spinner("Syncing with GitHub..."):
+                    if save_to_github_all():
+                        st.success("✅ Synced to GitHub!")
+                        add_log_entry("INFO", "Manual GitHub sync completed")
+                    else:
+                        st.error("❌ Sync failed")
+                        add_log_entry("ERROR", "Manual GitHub sync failed")
+            
+            st.caption(f"📁 Repo: {GITHUB_CONFIG['repo']}")
+            st.caption(f"📂 Folder: {GITHUB_CONFIG['data_folder']}")
+        else:
+            st.warning("⚠️ GitHub not configured")
+            st.info("💡 Add GITHUB_TOKEN to Streamlit secrets to enable GitHub backup")
 
         st.markdown('<div class="cyber-divider"></div>', unsafe_allow_html=True)
 
@@ -1495,7 +1655,20 @@ def main():
     # TAB 2 - HISTORICAL with Prediction Chart
     with tab2:
         st.markdown("### 📊 HISTORICAL DATA & PREDICTIONS")
-        hist = load_historical_data(100)
+        
+        # GitHub sync button for historical data
+        if GITHUB_CONFIG['token']:
+            col_sync1, col_sync2 = st.columns([3, 1])
+            with col_sync2:
+                if st.button("🔄 Sync with GitHub", use_container_width=True):
+                    with st.spinner("Syncing from GitHub..."):
+                        if sync_with_github():
+                            st.success("✅ Synced from GitHub!")
+                            st.rerun()
+                        else:
+                            st.error("❌ Sync failed")
+        
+        hist = load_historical_data(500)
         
         if not hist.empty:
             fig = go.Figure()
@@ -1531,17 +1704,23 @@ def main():
             display_cols = [c for c in cols if c in hist.columns]
             if 'congestion_prediction' in hist.columns:
                 hist['congestion'] = hist['congestion_prediction'].map({0: 'No', 1: '⚠️ Yes'})
-            st.dataframe(hist[display_cols].head(20), use_container_width=True)
+            st.dataframe(hist[display_cols].head(50), use_container_width=True)
             
             csv = hist.to_csv(index=False)
             st.download_button("📥 Export CSV", csv, "netpulse_data.csv", "text/csv")
+            
+            # Option to export all data
+            full_hist = load_historical_data(10000)
+            if len(full_hist) > len(hist):
+                full_csv = full_hist.to_csv(index=False)
+                st.download_button("📥 Export ALL Data", full_csv, "netpulse_all_data.csv", "text/csv")
         else:
             st.info("No historical data yet. Data will save automatically when ThingSpeak provides readings.")
 
     # TAB 3 - DIAGNOSTICS
     with tab3:
         st.markdown("### 💡 DIAGNOSTICS HISTORY")
-        recs_df = load_recommendations_history(50)
+        recs_df = load_recommendations_history(200)
         if not recs_df.empty:
             col_f1, col_f2 = st.columns(2)
             with col_f1:
@@ -1584,7 +1763,7 @@ def main():
                 st.cache_data.clear()
                 st.rerun()
         
-        logs_df = load_system_logs(200)
+        logs_df = load_system_logs(500)
         
         if not logs_df.empty:
             if log_filter != "All":
