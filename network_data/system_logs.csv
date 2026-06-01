@@ -93,3 +93,5 @@ timestamp,log_type,message
 2026-06-01 13:37:34,INFO,Uploaded to GitHub: system_logs.csv
 2026-06-01 13:37:34,INFO,scikit-learn version 1.8.0 available
 2026-06-01 13:54:13,INFO,scikit-learn version 1.8.0 available
+2026-06-01 13:54:14,INFO,Uploaded to GitHub: system_logs.csv
+2026-06-01 13:54:14,ERROR,GitHub upload failed: 409
