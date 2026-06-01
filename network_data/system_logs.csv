@@ -4,3 +4,4 @@ timestamp,log_type,message
 2026-06-01 15:51:43,ERROR,GitHub upload error: maximum recursion depth exceeded
 2026-06-01 15:51:43,INFO,scikit-learn version 1.8.0 available
 2026-06-01 16:00:07,INFO,scikit-learn version 1.8.0 available
+2026-06-01 16:00:08,INFO,Uploaded to GitHub: system_logs.csv
