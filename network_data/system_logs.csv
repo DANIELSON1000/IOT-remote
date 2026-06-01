@@ -140,3 +140,5 @@ timestamp,log_type,message
 2026-06-01 15:46:57,INFO,Uploaded to GitHub: system_logs.csv
 2026-06-01 15:46:58,INFO,Uploaded to GitHub: system_logs.csv
 2026-06-01 15:46:59,INFO,Uploaded to GitHub: system_logs.csv
+2026-06-01 15:47:01,INFO,Uploaded to GitHub: system_logs.csv
+2026-06-01 15:47:01,ERROR,GitHub upload failed: 409
