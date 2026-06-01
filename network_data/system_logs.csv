@@ -1,7 +1,2 @@
 timestamp,log_type,message
-2026-06-01 16:23:39,INFO,All files synced to GitHub successfully
-2026-06-01 16:23:40,INFO,Uploaded to GitHub: system_logs.csv
-2026-06-01 16:23:41,INFO,Uploaded to GitHub: system_logs.csv
-2026-06-01 16:23:42,INFO,Uploaded to GitHub: system_logs.csv
-2026-06-01 16:23:43,INFO,Uploaded to GitHub: system_logs.csv
-2026-06-01 16:23:43,ERROR,GitHub upload failed: 409
+2026-06-01 16:23:46,INFO,All files synced to GitHub successfully
