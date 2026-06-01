@@ -1,5 +1,2 @@
 timestamp,log_type,message
-2026-06-01 15:51:03,INFO,All files synced to GitHub successfully
-2026-06-01 15:51:04,INFO,Uploaded to GitHub: system_logs.csv
-2026-06-01 15:51:06,INFO,Uploaded to GitHub: system_logs.csv
-2026-06-01 15:51:07,INFO,Uploaded to GitHub: system_logs.csv
+2026-06-01 15:51:09,INFO,All files synced to GitHub successfully
