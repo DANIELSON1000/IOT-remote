@@ -765,3 +765,4 @@ timestamp,log_type,message
 2026-06-02 12:41:04,INFO,Uploaded to GitHub: system_logs.csv
 2026-06-02 12:41:04,ERROR,GitHub upload failed: 409
 2026-06-02 12:41:06,INFO,Uploaded to GitHub: system_logs.csv
+2026-06-02 12:41:07,INFO,Uploaded to GitHub: system_logs.csv
