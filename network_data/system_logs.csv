@@ -1,3 +1,4 @@
 timestamp,log_type,message
 2026-06-03 18:29:30,INFO,All files synced to GitHub successfully
 2026-06-03 18:29:32,INFO,Uploaded to GitHub: system_logs.csv
+2026-06-03 18:29:33,INFO,Uploaded to GitHub: system_logs.csv
