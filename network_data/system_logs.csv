@@ -1,3 +1,2 @@
 timestamp,log_type,message
-2026-06-03 18:26:52,INFO,All files synced to GitHub successfully
-2026-06-03 18:27:02,ERROR,"GitHub upload error: ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))"
+2026-06-03 18:27:04,INFO,All files synced to GitHub successfully
