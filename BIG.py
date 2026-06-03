@@ -1,9 +1,5 @@
 # -*- coding: utf-8 -*-
-"""
-NetPulse AI Monitor - Complete Edition with GitHub Storage
-Features: ESP8266 Control + ML Congestion Prediction + GitHub CSV Storage
-Cyberpunk UI with Live Animations & Email Notifications
-"""
+
 
 import streamlit as st
 import pandas as pd
