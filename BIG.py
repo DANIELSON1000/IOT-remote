@@ -2,6 +2,7 @@
 """
 NetPulse AI Monitor - Complete Edition with Congestion Prediction
 Enhanced Cyberpunk UI with Manual ESP8266 IP Control + ML Prediction
+NO DATABASE VERSION
 """
 
 import streamlit as st
@@ -10,14 +11,11 @@ import numpy as np
 import joblib
 import requests
 from datetime import datetime, timedelta
-import mysql.connector
-from mysql.connector import Error
 import plotly.graph_objects as go
 import plotly.express as px
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-import socket
 import os
 import time
 import re
@@ -39,7 +37,6 @@ ONLINE_THRESHOLD_SECONDS = 60
 STALE_THRESHOLD_SECONDS = 120
 OFFLINE_THRESHOLD_SECONDS = 300
 REFRESH_INTERVAL = 15
-DATABASE_SAVE_INTERVAL = 60
 
 ESP8266_PORT = 80
 
@@ -74,10 +71,9 @@ TEST_SCENARIOS = {
 }
 
 # -------------------------
-# Session State Initialization
+# Session State
 # -------------------------
 def init_session_state():
-    """Initialize all session state variables"""
     defaults = {
         'last_refresh': datetime.now(),
         'auto_refresh': True,
@@ -86,11 +82,9 @@ def init_session_state():
         'time_diff': 0,
         'last_update': None,
         'status': "offline",
-        'last_database_save': datetime.now(),
         'pulse_triggered': False,
         'update_count': 0,
         'last_notification_sent': {},
-        'email_configured': False,
         'test_mode': False,
         'test_scenario': None,
         'esp_ip': None,
@@ -101,28 +95,25 @@ def init_session_state():
         'prediction': None,
         'prediction_probability': None,
         'model_loaded': False,
-        'congestion_model': None,  # Store the loaded model here
         'diagnostic_history': [],
         'last_congestion_alert_sent': None,
         'last_esp_command_response': None,
-        'initialized': True
+        'history_data': []  # In-memory history for charts
     }
     
     for key, val in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = val
 
-# Call initialization
 init_session_state()
 
 # -------------------------
-# Load ML Model - ONCE at startup
+# Load ML Model
 # -------------------------
 @st.cache_resource
 def load_congestion_model():
-    """Load the pre-trained Random Forest model - called only once"""
+    """Load the pre-trained Random Forest model"""
     
-    # Try multiple possible locations for the model file
     possible_paths = [
         "random_forest_congestion_model.pkl",
         "./models/random_forest_congestion_model.pkl",
@@ -136,78 +127,66 @@ def load_congestion_model():
             if os.path.exists(path):
                 model = joblib.load(path)
                 st.session_state.model_loaded = True
-                st.session_state.congestion_model = model
                 return model
         except Exception:
             continue
     
-    # If model not found, create a fallback model
+    # Fallback model
     st.session_state.model_loaded = False
     
-    # Create a simple fallback function
     class FallbackModel:
         def predict(self, X):
-            # Rule-based prediction
             results = []
             for features in X:
                 active_devices, latency, packet_loss, bandwidth = features
-                # Congestion heuristics
                 if latency > 150 or packet_loss > 3 or bandwidth < 20:
-                    results.append(1)  # Congested
+                    results.append(1)
                 elif latency > 100 or packet_loss > 2 or bandwidth < 30:
-                    results.append(1)  # Likely congested
+                    results.append(1)
                 else:
-                    results.append(0)  # Not congested
+                    results.append(0)
             return np.array(results)
         
         def predict_proba(self, X):
-            # Return dummy probabilities
             results = []
             for features in X:
                 latency, packet_loss, bandwidth = features[1], features[2], features[3]
                 if latency > 150 or packet_loss > 3 or bandwidth < 20:
-                    results.append([0.1, 0.9])  # High confidence congested
+                    results.append([0.1, 0.9])
                 elif latency > 100 or packet_loss > 2 or bandwidth < 30:
-                    results.append([0.3, 0.7])  # Medium confidence
+                    results.append([0.3, 0.7])
                 else:
-                    results.append([0.85, 0.15])  # High confidence not congested
+                    results.append([0.85, 0.15])
             return np.array(results)
     
-    fallback = FallbackModel()
-    st.session_state.congestion_model = fallback
-    return fallback
+    return FallbackModel()
 
-# Load the model ONCE at startup
 MODEL = load_congestion_model()
 
+# -------------------------
+# Prediction Functions
+# -------------------------
 def predict_congestion(google_latency, google_packet_loss, google_bandwidth, 
                        youtube_latency, youtube_packet_loss, youtube_bandwidth,
                        active_devices=10):
-    """Predict network congestion using the pre-loaded ML model"""
+    """Predict network congestion using the ML model"""
     
-    # Use the worse metrics for prediction
     latency = max(google_latency, youtube_latency)
     packet_loss = max(google_packet_loss, youtube_packet_loss)
     bandwidth = min(google_bandwidth, youtube_bandwidth)
     
-    # Convert to float for numpy
     features = np.array([[float(active_devices), float(latency), float(packet_loss), float(bandwidth)]])
     
     try:
-        model = st.session_state.congestion_model
-        if model is None:
-            model = MODEL
-        
+        model = MODEL
         prediction = model.predict(features)[0]
-        prediction = int(prediction)  # Convert numpy.int64 to native int
+        prediction = int(prediction)
         
         if hasattr(model, 'predict_proba'):
             proba = model.predict_proba(features)[0]
             probability = float(proba[1]) if prediction == 1 else float(proba[0])
         else:
-            # Estimate confidence based on feature values
             if prediction == 1:
-                # Higher confidence if metrics are clearly bad
                 if latency > 200 or packet_loss > 5 or bandwidth < 15:
                     probability = 0.95
                 elif latency > 150 or packet_loss > 3 or bandwidth < 25:
@@ -223,9 +202,7 @@ def predict_congestion(google_latency, google_packet_loss, google_bandwidth,
                     probability = 0.75
         
         return prediction, probability
-    except Exception as e:
-        print(f"Prediction error: {str(e)}")
-        # Fallback prediction
+    except Exception:
         if latency > 150 or packet_loss > 3 or bandwidth < 20:
             return 1, 0.80
         else:
@@ -387,10 +364,8 @@ def apply_test_scenario(scenario_key):
         else:
             st.session_state.test_mode = True
             st.session_state.test_scenario = scenario_key
-        add_log_entry('TEST', f'ESP: {scenario["name"]} - {message}')
         return True, message
     else:
-        add_log_entry('ERROR', f'ESP command failed: {message}')
         return False, message
 
 # -------------------------
@@ -452,10 +427,8 @@ def send_email_notification(subject, body, alert_type="general"):
         server.send_message(msg)
         server.quit()
         st.session_state.last_notification_sent[alert_type] = datetime.now()
-        add_log_entry('EMAIL', f'Alert sent: {subject[:50]}')
         return True, "Sent"
     except Exception as e:
-        add_log_entry('ERROR', f'Email failed: {str(e)}')
         return False, str(e)
 
 def send_congestion_diagnostic_email(data, prediction, probability):
@@ -547,7 +520,6 @@ def send_congestion_diagnostic_email(data, prediction, probability):
     success, msg = send_email_notification(subject, body, "congestion_prediction")
     if success:
         st.session_state.last_congestion_alert_sent = datetime.now()
-        add_log_entry('CONGESTION', f'Alert sent - {risk_level} risk, {probability*100:.0f}% confidence')
     
     return success
 
@@ -582,8 +554,10 @@ def check_and_send_alerts(data, prediction, probability):
         """
         send_email_notification(subject, body, "congestion")
 
+# -------------------------
+# Diagnostic Functions
+# -------------------------
 def analyze_network_performance(data):
-    """Comprehensive network diagnostic analysis"""
     if not data:
         return []
     
@@ -663,7 +637,6 @@ def analyze_network_performance(data):
     return diagnostics
 
 def get_network_health_score(data):
-    """Calculate detailed health score breakdown"""
     if not data:
         return {}
     
@@ -681,176 +654,19 @@ def get_network_health_score(data):
     }
 
 def get_performance_metrics(hist_data):
-    """Calculate historical performance metrics"""
-    if hist_data.empty or len(hist_data) < 2:
+    if not hist_data or len(hist_data) < 2:
         return {}
     
-    recent = hist_data.head(10)
+    recent = hist_data[:10]
     
     return {
-        'avg_score': hist_data['network_score'].mean(),
-        'min_score': hist_data['network_score'].min(),
-        'max_score': hist_data['network_score'].max(),
-        'std_dev': hist_data['network_score'].std(),
-        'trend': 'improving' if recent['network_score'].iloc[0] > recent['network_score'].iloc[-1] else 'degrading',
-        'congestion_rate': (hist_data['congestion_prediction'].sum() / len(hist_data)) * 100 if 'congestion_prediction' in hist_data else 0
+        'avg_score': np.mean([d['network_score'] for d in hist_data]),
+        'min_score': min([d['network_score'] for d in hist_data]),
+        'max_score': max([d['network_score'] for d in hist_data]),
+        'std_dev': np.std([d['network_score'] for d in hist_data]),
+        'trend': 'improving' if recent[0]['network_score'] > recent[-1]['network_score'] else 'degrading',
+        'congestion_rate': (sum(1 for d in hist_data if d.get('congestion_prediction', 0) == 1) / len(hist_data)) * 100
     }
-
-# -------------------------
-# Database Functions
-# -------------------------
-def get_db_connection():
-    try:
-        return mysql.connector.connect(
-            host='localhost', database='network_monitor',
-            user='root', password='',
-            connection_timeout=5, autocommit=True
-        )
-    except Error:
-        return None
-
-def initialize_database():
-    conn = get_db_connection()
-    if conn:
-        try:
-            cursor = conn.cursor()
-            
-            cursor.execute("SHOW TABLES LIKE 'network_metrics'")
-            if cursor.fetchone():
-                cursor.execute("SHOW COLUMNS FROM network_metrics LIKE 'prediction_probability'")
-                if not cursor.fetchone():
-                    cursor.execute("ALTER TABLE network_metrics ADD COLUMN prediction_probability FLOAT DEFAULT 0")
-            else:
-                cursor.execute("""
-                    CREATE TABLE network_metrics (
-                        id INT AUTO_INCREMENT PRIMARY KEY,
-                        timestamp DATETIME NOT NULL,
-                        google_latency FLOAT, google_packet_loss FLOAT, google_bandwidth FLOAT, google_quality_score INT,
-                        youtube_latency FLOAT, youtube_packet_loss FLOAT, youtube_bandwidth FLOAT, youtube_quality_score INT,
-                        combined_speed FLOAT, network_score FLOAT, network_status VARCHAR(20),
-                        congestion_prediction INT,
-                        prediction_probability FLOAT,
-                        test_mode BOOLEAN DEFAULT FALSE,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
-            
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS recommendations (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
-                    metric_id INT, service VARCHAR(20), recommendation TEXT, severity VARCHAR(20),
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS system_logs (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
-                    log_type VARCHAR(20), message TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            conn.commit()
-            cursor.close()
-            conn.close()
-            return True
-        except Error as e:
-            print(f"Database init error: {e}")
-            return False
-    return False
-
-def add_log_entry(log_type, message):
-    conn = get_db_connection()
-    if conn:
-        try:
-            cursor = conn.cursor()
-            cursor.execute("INSERT INTO system_logs (log_type, message) VALUES (%s, %s)", (log_type, message))
-            conn.commit()
-            cursor.close()
-            conn.close()
-        except Error:
-            pass
-
-def should_save_to_database():
-    return (datetime.now() - st.session_state.last_database_save).total_seconds() >= DATABASE_SAVE_INTERVAL
-
-def save_classified_metrics(data, prediction, probability):
-    conn = get_db_connection()
-    if not conn:
-        return False
-    try:
-        cursor = conn.cursor()
-        now = datetime.now()
-        
-        google_latency = float(data['google_latency'])
-        google_packet_loss = float(data['google_packet_loss'])
-        google_bandwidth = float(data['google_bandwidth'])
-        google_quality = int(data['google_quality'])
-        
-        youtube_latency = float(data['youtube_latency'])
-        youtube_packet_loss = float(data['youtube_packet_loss'])
-        youtube_bandwidth = float(data['youtube_bandwidth'])
-        youtube_quality = int(data['youtube_quality'])
-        
-        combined_speed = float(data['combined_speed'])
-        network_score = float(data['network_score'])
-        network_status = str(data['network_status'])
-        
-        pred_value = int(prediction) if prediction is not None else 0
-        prob_value = float(probability) if probability is not None else 0.0
-        test_mode_value = 1 if st.session_state.test_mode else 0
-        
-        cursor.execute("""
-            INSERT INTO network_metrics 
-            (timestamp, google_latency, google_packet_loss, google_bandwidth, google_quality_score,
-             youtube_latency, youtube_packet_loss, youtube_bandwidth, youtube_quality_score,
-             combined_speed, network_score, network_status, congestion_prediction, prediction_probability, test_mode)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """, (now, google_latency, google_packet_loss, google_bandwidth, google_quality,
-              youtube_latency, youtube_packet_loss, youtube_bandwidth, youtube_quality,
-              combined_speed, network_score, network_status, pred_value, prob_value, test_mode_value))
-        
-        mid = cursor.lastrowid
-        for rec in generate_recommendations(data):
-            service = str(rec['service'])
-            message = str(rec['message'])
-            severity = str(rec['severity'])
-            cursor.execute("INSERT INTO recommendations (metric_id, service, recommendation, severity) VALUES (%s, %s, %s, %s)",
-                           (mid, service, message, severity))
-        
-        conn.commit()
-        st.session_state.last_database_save = now
-        cursor.close()
-        conn.close()
-        return True
-    except Error as e:
-        st.error(f"Database error: {str(e)}")
-        return False
-
-@st.cache_data(ttl=30, show_spinner=False)
-def load_historical_data(limit=100):
-    conn = get_db_connection()
-    if conn:
-        try:
-            df = pd.read_sql("SELECT * FROM network_metrics ORDER BY timestamp DESC LIMIT %s", conn, params=(int(limit),))
-            conn.close()
-            if not df.empty:
-                df['timestamp'] = pd.to_datetime(df['timestamp'])
-            return df
-        except:
-            return pd.DataFrame()
-    return pd.DataFrame()
-
-@st.cache_data(ttl=30, show_spinner=False)
-def load_system_logs(limit=100):
-    conn = get_db_connection()
-    if conn:
-        try:
-            df = pd.read_sql("SELECT * FROM system_logs ORDER BY created_at DESC LIMIT %s", conn, params=(int(limit),))
-            conn.close()
-            return df
-        except:
-            return pd.DataFrame()
-    return pd.DataFrame()
 
 # -------------------------
 # ThingSpeak Fetch
@@ -921,7 +737,7 @@ def refresh_data():
         st.session_state.status = status
         st.session_state.last_refresh = datetime.now()
         
-        # Run congestion prediction using pre-loaded model
+        # Run congestion prediction
         prediction, probability = predict_congestion(
             data['google_latency'], data['google_packet_loss'], data['google_bandwidth'],
             data['youtube_latency'], data['youtube_packet_loss'], data['youtube_bandwidth']
@@ -929,20 +745,25 @@ def refresh_data():
         st.session_state.prediction = prediction
         st.session_state.prediction_probability = probability
         
+        # Store in history (keep last 100 entries)
+        entry = data.copy()
+        entry['timestamp'] = datetime.now()
+        entry['congestion_prediction'] = prediction
+        entry['prediction_probability'] = probability
+        st.session_state.history_data.append(entry)
+        if len(st.session_state.history_data) > 100:
+            st.session_state.history_data = st.session_state.history_data[-100:]
+        
         if changed:
             st.session_state.update_count += 1
             st.session_state.pulse_triggered = True
-            
-            # Send alerts including congestion detection
             check_and_send_alerts(data, prediction, probability)
         
-        if should_save_to_database():
-            save_classified_metrics(data, prediction if prediction is not None else 0, probability if probability is not None else 0.0)
         return True
     return False
 
 # -------------------------
-# CSS (truncated for brevity - same as before)
+# CSS
 # -------------------------
 st.markdown("""
 <style>
@@ -1270,13 +1091,14 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -------------------------
-# Initialize Database
+# Auto Refresh
 # -------------------------
-initialize_database()
+now = datetime.now()
+since_refresh = (now - st.session_state.last_refresh).total_seconds()
 
-# Initial data load if needed
-if st.session_state.data is None:
+if since_refresh >= REFRESH_INTERVAL and st.session_state.auto_refresh:
     refresh_data()
+    st.rerun()
 
 # -------------------------
 # MAIN APP
@@ -1300,8 +1122,548 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-    # Sidebar and tabs (same as before - omitted for brevity)
-    # ... [rest of the sidebar and tab code remains the same]
+    # Sidebar
+    with st.sidebar:
+        st.markdown("""
+        <div style="font-family:'Orbitron',monospace; font-size:0.7rem; letter-spacing:0.2rem;
+             color:#00f5ff; margin-bottom:1rem; padding-bottom:6px;
+             border-bottom:1px solid rgba(0,245,255,0.15);">
+            ⬡ SYSTEM CONTROLS
+        </div>
+        """, unsafe_allow_html=True)
+
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            auto_refresh = st.toggle("AUTO REFRESH", value=st.session_state.auto_refresh)
+            if auto_refresh != st.session_state.auto_refresh:
+                st.session_state.auto_refresh = auto_refresh
+                st.rerun()
+        with col2:
+            if st.button("⟳", help="Refresh Now", use_container_width=True):
+                refresh_data()
+                st.rerun()
+
+        st.markdown('<div class="cyber-divider"></div>', unsafe_allow_html=True)
+
+        # ESP8266 MANUAL IP SECTION
+        st.markdown("""
+        <div style="font-family:'Orbitron',monospace; font-size:0.7rem; letter-spacing:0.15rem;
+             color:#00f5ff; margin-bottom:8px;">
+            🔌 ESP8266 CONTROL
+        </div>
+        """, unsafe_allow_html=True)
+
+        col_ip1, col_ip2 = st.columns([3, 1])
+        with col_ip1:
+            esp_ip_input = st.text_input(
+                "ESP IP Address",
+                value=st.session_state.esp_manual_ip,
+                placeholder="192.168.1.100",
+                key="esp_ip_field",
+                label_visibility="collapsed"
+            )
+            if esp_ip_input:
+                st.session_state.esp_manual_ip = esp_ip_input
+        
+        with col_ip2:
+            if st.button("🔌 CONNECT", use_container_width=True, key="connect_esp"):
+                if st.session_state.esp_manual_ip:
+                    with st.spinner("Connecting..."):
+                        success, msg = test_esp_connection(st.session_state.esp_manual_ip)
+                        if success:
+                            st.session_state.esp_ip = st.session_state.esp_manual_ip
+                            st.session_state.esp_status = 'connected'
+                            st.session_state.esp_last_seen = datetime.now()
+                            st.success("✅ Connected!")
+                            st.rerun()
+                        else:
+                            st.session_state.esp_status = 'disconnected'
+                            st.error(f"❌ {msg}")
+                else:
+                    st.warning("Enter IP first")
+
+        if st.session_state.esp_ip:
+            if st.session_state.esp_status == 'connected':
+                st.markdown(f"""
+                <div class="sidebar-stat">
+                    <span class="status-online" style="font-family:'Share Tech Mono',monospace;">◉ CONNECTED</span>
+                    <span class="sidebar-stat-value">{st.session_state.esp_ip}</span>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                col_test, col_clear = st.columns(2)
+                with col_test:
+                    if st.button("🔄 TEST", use_container_width=True):
+                        success, msg = test_esp_connection(st.session_state.esp_ip)
+                        if success:
+                            st.success("✅ Online")
+                            st.session_state.esp_status = 'connected'
+                        else:
+                            st.error(f"❌ {msg}")
+                            st.session_state.esp_status = 'disconnected'
+                with col_clear:
+                    if st.button("🗑 CLEAR", use_container_width=True):
+                        st.session_state.esp_ip = None
+                        st.session_state.esp_status = 'disconnected'
+                        st.session_state.esp_manual_ip = ''
+                        st.rerun()
+            else:
+                st.markdown(f"""
+                <div class="sidebar-stat">
+                    <span class="status-offline" style="font-family:'Share Tech Mono',monospace;">✕ OFFLINE</span>
+                    <span class="sidebar-stat-value">{st.session_state.esp_ip}</span>
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.info("📡 Enter ESP8266 IP and click CONNECT")
+
+        st.markdown('<div class="cyber-divider"></div>', unsafe_allow_html=True)
+
+        # Network Test Panel
+        if st.session_state.esp_ip and st.session_state.esp_status == 'connected':
+            st.markdown("""
+            <div style="font-family:'Orbitron',monospace; font-size:0.7rem; letter-spacing:0.15rem;
+                 color:#00f5ff; margin-bottom:8px;">
+                🧪 NETWORK TEST
+            </div>
+            """, unsafe_allow_html=True)
+            
+            if st.session_state.test_mode:
+                st.warning(f"🧪 {TEST_SCENARIOS[st.session_state.test_scenario]['name']}")
+            
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("🎬 YouTube Degrade", use_container_width=True):
+                    success, msg = apply_test_scenario('youtube_degraded')
+                    if success:
+                        st.success("✅ YouTube test active")
+                        refresh_data()
+                        st.rerun()
+                    else:
+                        st.error(f"❌ {msg}")
+                
+                if st.button("🔍 Google Degrade", use_container_width=True):
+                    success, msg = apply_test_scenario('google_degraded')
+                    if success:
+                        st.success("✅ Google test active")
+                        refresh_data()
+                        st.rerun()
+                    else:
+                        st.error(f"❌ {msg}")
+            
+            with c2:
+                if st.button("⚠️ Both Degrade", use_container_width=True):
+                    success, msg = apply_test_scenario('both_degraded')
+                    if success:
+                        st.success("✅ Both test active")
+                        refresh_data()
+                        st.rerun()
+                    else:
+                        st.error(f"❌ {msg}")
+                
+                if st.button("✅ Normal Mode", use_container_width=True):
+                    success, msg = apply_test_scenario('recovery')
+                    if success:
+                        st.success("✅ Normal mode restored")
+                        refresh_data()
+                        st.rerun()
+                    else:
+                        st.error(f"❌ {msg}")
+            
+            st.markdown('<div class="cyber-divider"></div>', unsafe_allow_html=True)
+
+        # Email Settings
+        st.markdown("""
+        <div style="font-family:'Orbitron',monospace; font-size:0.7rem; letter-spacing:0.15rem;
+             color:#00f5ff; margin-bottom:8px;">
+            ✉ ALERTS
+        </div>
+        """, unsafe_allow_html=True)
+        
+        with st.expander("📧 Email Config", expanded=False):
+            st.caption(f"Recipient: {EMAIL_CONFIG['recipient_email']}")
+            if st.button("📧 TEST EMAIL", use_container_width=True):
+                success, msg = test_email_connection()
+                if success:
+                    send_email_notification("Test", "<div class='good'>✅ ESP8266 NETWORK MONITOR SYSTEM Test OK</div>", "test")
+                    st.success("Test email sent!")
+                else:
+                    st.error(f"❌ {msg}")
+
+        st.markdown('<div class="cyber-divider"></div>', unsafe_allow_html=True)
+
+        # Timer
+        if st.session_state.auto_refresh:
+            next_refresh = max(0, REFRESH_INTERVAL - since_refresh)
+            st.markdown(f"""
+            <div class="sidebar-stat">
+                <span class="sidebar-stat-label">⏱ NEXT UPDATE</span>
+                <span class="sidebar-stat-value">{int(next_refresh)}s</span>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # ThingSpeak Status
+        if st.session_state.data is None:
+            refresh_data()
+        
+        status = st.session_state.status
+        td = st.session_state.time_diff
+        status_map = {
+            'online': ('status-online', '◉ ONLINE', '#00ff88'),
+            'recent': ('status-online', '◎ RECENT', '#00f5ff'),
+            'stale': ('status-stale', '◌ STALE', '#ffaa00'),
+            'offline': ('status-offline', '✕ OFFLINE', '#ff003c'),
+        }
+        sc, sl, scolor = status_map.get(status, ('status-offline', '✕ OFFLINE', '#ff003c'))
+        st.markdown(f"""
+        <div class="sidebar-stat">
+            <span class="{sc}" style="font-family:'Share Tech Mono',monospace;">{sl}</span>
+            <span class="sidebar-stat-label" style="color:{scolor};">{format_time_diff(td) if td else "—"}</span>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.markdown('<div class="cyber-divider"></div>', unsafe_allow_html=True)
+        
+        # Stats
+        hist_data = st.session_state.history_data
+        if hist_data:
+            st.markdown("""<div style="font-family:'Orbitron',monospace; font-size:0.65rem; color:#5a7a9a;">⬡ STATS</div>""", unsafe_allow_html=True)
+            st.metric("RECORDS", len(hist_data))
+            avg_score = np.mean([d['network_score'] for d in hist_data])
+            st.metric("AVG SCORE", f"{avg_score:.0f}/100")
+        
+        st.caption(f"🕒 {st.session_state.last_refresh.strftime('%H:%M:%S')}")
+
+    # TABS
+    tab1, tab2, tab3, tab4 = st.tabs(["🛰 LIVE DASHBOARD", "📊 HISTORICAL", "🔍 DIAGNOSTICS", "📝 LOGS"])
+
+    # TAB 1 - LIVE DASHBOARD
+    with tab1:
+        data = st.session_state.data
+        
+        if st.session_state.test_mode:
+            scenario = TEST_SCENARIOS[st.session_state.test_scenario]
+            st.markdown(f'<div class="test-banner">🧪 {scenario["name"]}<br><small>{scenario["description"]}</small></div>', unsafe_allow_html=True)
+
+        if data and data['network_score'] > 0:
+            ns = data['network_score']
+            nc = score_color(ns)
+            network_status = data['network_status']
+            
+            col_score, col_pred = st.columns([1, 1.2], gap="large")
+            
+            with col_score:
+                st.markdown(f"""
+                <div class="score-ring-wrap">
+                    <div class="score-label">NETWORK HEALTH</div>
+                    <div class="score-number" style="color:{nc};">{ns:.0f}</div>
+                    <div class="score-label">/ 100</div>
+                    <div class="score-status" style="color:{nc};">{network_status}</div>
+                    <div style="margin-top:12px;">{data['combined_speed']:.1f} MBPS</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col_pred:
+                if st.session_state.prediction is not None:
+                    pred = st.session_state.prediction
+                    prob = st.session_state.prediction_probability if st.session_state.prediction_probability else 0
+                    risk_level, risk_color, risk_msg = get_congestion_risk_level(prob)
+                    
+                    if pred == 1:
+                        st.markdown(f"""
+                        <div class="prediction-card" style="border: 1px solid {risk_color};">
+                            <div class="prediction-risk" style="color:{risk_color};">
+                                ⚠️ CONGESTION PREDICTED
+                            </div>
+                            <div class="prediction-message">
+                                🤖 AI Model Confidence: {prob*100:.1f}%<br>
+                                Risk Level: <span style="color:{risk_color}; font-weight:bold;">{risk_level}</span><br>
+                                {risk_msg}
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    else:
+                        st.markdown(f"""
+                        <div class="prediction-card" style="border: 1px solid {risk_color};">
+                            <div class="prediction-risk" style="color:{risk_color};">
+                                ✓ NO CONGESTION PREDICTED
+                            </div>
+                            <div class="prediction-message">
+                                🤖 AI Model Confidence: {prob*100:.1f}%<br>
+                                Risk Level: <span style="color:{risk_color}; font-weight:bold;">{risk_level}</span><br>
+                                {risk_msg}
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                else:
+                    st.markdown("""
+                    <div class="prediction-card">
+                        <div class="prediction-risk" style="color:#5a7a9a;">
+                            🤖 AI MODEL
+                        </div>
+                        <div class="prediction-message">
+                            Waiting for data to run congestion prediction...
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                m1, m2, m3 = st.columns(3)
+                with m1:
+                    st.metric("GOOGLE", f"{data['google_quality']}/100")
+                with m2:
+                    st.metric("YOUTUBE", f"{data['youtube_quality']}/100")
+                with m3:
+                    st.metric("SPEED", f"{data['combined_speed']:.0f} Mbps")
+            
+            st.markdown('<div class="cyber-divider"></div>', unsafe_allow_html=True)
+            
+            col_g, col_y = st.columns(2)
+            
+            with col_g:
+                gq = data['google_quality']
+                gqc = score_color(gq)
+                st.markdown(f"""
+                <div class="svc-panel" style="border-top:3px solid #4285f4;">
+                    <div class="svc-title" style="color:#4285f4;">🔍 GOOGLE</div>
+                    <div class="quality-bar-track">
+                        <div class="quality-bar-fill" style="width:{gq}%; background:{gqc};"></div>
+                    </div>
+                    <div class="metric-row">
+                        <div class="metric-cell"><div class="metric-cell-label">LATENCY</div><div class="metric-cell-value">{data['google_latency']:.0f}<span class="metric-cell-unit">ms</span></div></div>
+                        <div class="metric-cell"><div class="metric-cell-label">LOSS</div><div class="metric-cell-value">{data['google_packet_loss']:.1f}<span class="metric-cell-unit">%</span></div></div>
+                        <div class="metric-cell"><div class="metric-cell-label">BW</div><div class="metric-cell-value">{data['google_bandwidth']:.0f}<span class="metric-cell-unit">Mbps</span></div></div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col_y:
+                yq = data['youtube_quality']
+                yqc = score_color(yq)
+                st.markdown(f"""
+                <div class="svc-panel" style="border-top:3px solid #ff4444;">
+                    <div class="svc-title" style="color:#ff4444;">▶ YOUTUBE</div>
+                    <div class="quality-bar-track">
+                        <div class="quality-bar-fill" style="width:{yq}%; background:{yqc};"></div>
+                    </div>
+                    <div class="metric-row">
+                        <div class="metric-cell"><div class="metric-cell-label">LATENCY</div><div class="metric-cell-value">{data['youtube_latency']:.0f}<span class="metric-cell-unit">ms</span></div></div>
+                        <div class="metric-cell"><div class="metric-cell-label">LOSS</div><div class="metric-cell-value">{data['youtube_packet_loss']:.1f}<span class="metric-cell-unit">%</span></div></div>
+                        <div class="metric-cell"><div class="metric-cell-label">BW</div><div class="metric-cell-value">{data['youtube_bandwidth']:.0f}<span class="metric-cell-unit">Mbps</span></div></div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            st.markdown('<div class="cyber-divider"></div>', unsafe_allow_html=True)
+            
+            st.markdown("### 💡 RECOMMENDATIONS")
+            for rec in generate_recommendations(data):
+                cls = rec['severity']
+                icon = {'critical':'⚠', 'warning':'◈', 'good':'✓'}.get(cls, '◎')
+                st.markdown(f'<div class="alert-{cls}"><strong>[{rec["service"]}]</strong> {icon} {rec["message"]}</div>', unsafe_allow_html=True)
+        
+        elif data and data['network_score'] == 0:
+            st.warning("⚠ Device active - awaiting valid reading")
+        else:
+            st.info("📡 Waiting for ThingSpeak data...")
+
+    # TAB 2 - HISTORICAL
+    with tab2:
+        st.markdown("### 📊 HISTORICAL DATA & PREDICTIONS")
+        hist_data = st.session_state.history_data
+        
+        if hist_data:
+            df = pd.DataFrame(hist_data)
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            
+            fig = go.Figure()
+            
+            fig.add_trace(go.Scatter(x=df['timestamp'], y=df['network_score'], 
+                                    mode='lines+markers', name='Network Score', 
+                                    line=dict(color='#00f5ff', width=2),
+                                    marker=dict(size=4)))
+            
+            fig.add_trace(go.Scatter(x=df['timestamp'], y=df['combined_speed'], 
+                                    mode='lines', name='Speed (Mbps)', 
+                                    yaxis='y2', line=dict(color='#00ff88', width=1.5)))
+            
+            if 'congestion_prediction' in df.columns:
+                pred_data = df[df['congestion_prediction'] == 1]
+                if not pred_data.empty:
+                    fig.add_trace(go.Scatter(x=pred_data['timestamp'], y=pred_data['network_score'],
+                                            mode='markers', name='⚠️ Congestion Predicted',
+                                            marker=dict(size=12, color='#ff003c', symbol='x'),
+                                            yaxis='y'))
+            
+            fig.update_layout(
+                title="Network Metrics & AI Predictions Over Time",
+                xaxis=dict(gridcolor='rgba(0,245,255,0.05)'),
+                yaxis=dict(title='Score', range=[0, 100], gridcolor='rgba(0,245,255,0.05)'),
+                yaxis2=dict(title='Speed (Mbps)', overlaying='y', side='right'),
+                template='plotly_dark', height=400,
+                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)'
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            
+            display_cols = ['timestamp', 'network_score', 'network_status', 'combined_speed']
+            if 'congestion_prediction' in df.columns:
+                df['congestion'] = df['congestion_prediction'].map({0: 'No', 1: '⚠️ Yes'})
+                display_cols.append('congestion')
+            if 'prediction_probability' in df.columns:
+                display_cols.append('prediction_probability')
+            
+            st.dataframe(df[display_cols].tail(20), use_container_width=True)
+            
+            csv = df.to_csv(index=False)
+            st.download_button("📥 Export CSV", csv, "netpulse_data.csv", "text/csv")
+        else:
+            st.info("No historical data yet")
+
+    # TAB 3 - DIAGNOSTICS
+    with tab3:
+        st.markdown("### 🔍 NETWORK DIAGNOSTICS & ANALYSIS")
+        
+        data = st.session_state.data
+        
+        if data and data['network_score'] > 0:
+            health_scores = get_network_health_score(data)
+            
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("📡 Latency Health", f"{health_scores.get('latency', 0):.0f}/100")
+            with col2:
+                st.metric("📦 Packet Loss Health", f"{health_scores.get('packet_loss', 0):.0f}/100")
+            with col3:
+                st.metric("⚡ Bandwidth Health", f"{health_scores.get('bandwidth', 0):.0f}/100")
+            with col4:
+                st.metric("🔒 Stability Health", f"{health_scores.get('stability', 0):.0f}/100")
+            
+            st.markdown('<div class="cyber-divider"></div>', unsafe_allow_html=True)
+            
+            overall = health_scores.get('overall', 0)
+            st.markdown(f"""
+            <div class="diagnostic-card">
+                <div style="font-family:'Orbitron',monospace; font-size:0.9rem; margin-bottom:10px;">
+                    🩺 OVERALL NETWORK HEALTH: {overall:.0f}/100
+                </div>
+                <div class="health-meter">
+                    <div style="width:{overall}%; height:100%; background: linear-gradient(90deg, #00ff88, #00f5ff); border-radius:4px;"></div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            st.markdown("### 📋 DIAGNOSTIC REPORT")
+            diagnostics = analyze_network_performance(data)
+            
+            if diagnostics:
+                for diag in diagnostics:
+                    severity_color = {
+                        'critical': '#ff003c',
+                        'warning': '#ff6b00',
+                        'good': '#00ff88'
+                    }.get(diag['severity'], '#00f5ff')
+                    
+                    st.markdown(f"""
+                    <div class="diagnostic-card" style="border-left: 3px solid {severity_color};">
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                            <strong style="color:{severity_color};">⚠️ {diag['category']}</strong>
+                            <span style="color:#5a7a9a; font-size:0.7rem;">Value: {diag['metric_value']:.1f}</span>
+                        </div>
+                        <div style="margin: 8px 0; color: #a0b8cc;">{diag['message']}</div>
+                        <div style="font-size:0.8rem; color: #00f5ff;">💡 Solution: {diag['solution']}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+            else:
+                st.markdown("""
+                <div class="diagnostic-card" style="border-left: 3px solid #00ff88;">
+                    <strong style="color:#00ff88;">✅ ALL SYSTEMS NOMINAL</strong>
+                    <div style="margin: 8px 0; color: #a0b8cc;">No critical issues detected. Network performance is within acceptable parameters.</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            st.markdown('<div class="cyber-divider"></div>', unsafe_allow_html=True)
+            st.markdown("### 📈 HISTORICAL PERFORMANCE ANALYSIS")
+            
+            hist_data = st.session_state.history_data
+            if hist_data and len(hist_data) >= 2:
+                perf_metrics = get_performance_metrics(hist_data)
+                
+                col_a, col_b, col_c, col_d = st.columns(4)
+                with col_a:
+                    st.metric("📊 Avg Score", f"{perf_metrics.get('avg_score', 0):.0f}/100")
+                with col_b:
+                    st.metric("📉 Min Score", f"{perf_metrics.get('min_score', 0):.0f}/100")
+                with col_c:
+                    st.metric("📈 Max Score", f"{perf_metrics.get('max_score', 0):.0f}/100")
+                with col_d:
+                    trend_icon = "📈" if perf_metrics.get('trend') == 'improving' else "📉"
+                    trend_color = "#00ff88" if perf_metrics.get('trend') == 'improving' else "#ff6b00"
+                    st.markdown(f"""
+                    <div style="background:rgba(0,0,0,0.25); border-radius:8px; padding:0.5rem;">
+                        <div style="font-family:'Share Tech Mono',monospace; font-size:0.7rem; color:#7a9abc;">TREND</div>
+                        <div style="font-family:'Orbitron',monospace; font-size:1.2rem; color:{trend_color};">{trend_icon} {perf_metrics.get('trend', 'stable').upper()}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                st.markdown(f"""
+                <div class="diagnostic-card">
+                    <strong>📊 Performance Summary</strong><br>
+                    • Congestion Rate: {perf_metrics.get('congestion_rate', 0):.1f}% of monitored periods<br>
+                    • Score Stability: ±{perf_metrics.get('std_dev', 0):.1f} points deviation<br>
+                    • Network consistency is {'stable' if perf_metrics.get('std_dev', 0) < 15 else 'volatile'}
+                </div>
+                """, unsafe_allow_html=True)
+            
+            st.markdown('<div class="cyber-divider"></div>', unsafe_allow_html=True)
+            st.markdown("### 🛠 QUICK ACTIONS")
+            
+            col_q1, col_q2, col_q3 = st.columns(3)
+            with col_q1:
+                if st.button("🔄 Force Refresh", use_container_width=True):
+                    refresh_data()
+                    st.rerun()
+            with col_q2:
+                if st.button("📧 Send Diagnostic Report", use_container_width=True):
+                    diagnostics = analyze_network_performance(data)
+                    diagnostic_text = "\n".join([f"- {d['category']}: {d['message']}" for d in diagnostics[:5]])
+                    send_email_notification(
+                        "Diagnostic Report",
+                        f"Network Score: {data['network_score']:.0f}/100\n\nIssues Found:\n{diagnostic_text}",
+                        "diagnostic"
+                    )
+                    st.success("Diagnostic report sent!")
+            with col_q3:
+                if st.button("🗑 Clear History", use_container_width=True):
+                    st.session_state.history_data = []
+                    st.success("History cleared!")
+                    st.rerun()
+            
+        else:
+            st.info("📡 Waiting for network data to perform diagnostics...")
+
+    # TAB 4 - LOGS (simplified - no database)
+    with tab4:
+        st.markdown("### 📝 SYSTEM LOGS")
+        st.info("📡 Logs are stored in memory only. Recent activity shown below.")
+        
+        # Show recent events from session state
+        if st.session_state.history_data:
+            recent_entries = st.session_state.history_data[-10:]
+            for entry in reversed(recent_entries):
+                ts = entry.get('timestamp', datetime.now()).strftime('%H:%M:%S')
+                score = entry.get('network_score', 0)
+                status = entry.get('network_status', 'UNKNOWN')
+                pred = entry.get('congestion_prediction', 0)
+                pred_text = "⚠️ Congestion" if pred == 1 else "✅ Normal"
+                
+                st.markdown(f"""
+                <div style="background:rgba(0,0,0,0.2); border-left:2px solid {score_color(score)}; padding:6px 12px; margin:4px 0;">
+                    <span style="color:#5a7a9a; font-size:0.7rem;">{ts}</span>
+                    <strong style="color:{score_color(score)};"> [NETWORK]</strong>
+                    <span style="color:#a0b8cc;">Score: {score:.0f}/100 | {status} | {pred_text}</span>
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.info("No history yet - waiting for data")
 
 if __name__ == "__main__":
     main()
