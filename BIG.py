@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-NetPulse AI Monitor - True Auto-Update Edition
-Auto-updates every 30 seconds WITHOUT manual rerun
+NetPulse AI Monitor - Complete Edition with Congestion Prediction
+Enhanced Cyberpunk UI with Manual ESP8266 IP Control + ML Prediction
+AUTO-UPDATE EVERY 30 SECONDS
 """
 
 import streamlit as st
@@ -18,7 +19,6 @@ from email.mime.multipart import MIMEMultipart
 import os
 import time
 import re
-import threading
 
 # -------------------------
 # Page Configuration
@@ -36,7 +36,8 @@ st.set_page_config(
 ONLINE_THRESHOLD_SECONDS = 60
 STALE_THRESHOLD_SECONDS = 120
 OFFLINE_THRESHOLD_SECONDS = 300
-REFRESH_INTERVAL = 30  # Auto-update every 30 seconds
+REFRESH_INTERVAL = 30  # ⬅️ UPDATED: Auto-refresh every 30 seconds
+THINGSPEAK_UPDATE_INTERVAL = 15  # ThingSpeak updates every 15 seconds
 
 ESP8266_PORT = 80
 
@@ -98,11 +99,9 @@ def init_session_state():
         'diagnostic_history': [],
         'last_congestion_alert_sent': None,
         'last_esp_command_response': None,
-        'history_data': [],
-        'fetch_count': 0,
-        'running': True,
-        'last_update_time': None,
-        'update_placeholder': None
+        'history_data': [],  # In-memory history for charts
+        'last_fetch_time': None,  # Track when we last fetched from ThingSpeak
+        'fetch_count': 0  # Count successful fetches
     }
     
     for key, val in defaults.items():
@@ -135,6 +134,7 @@ def load_congestion_model():
         except Exception:
             continue
     
+    # Fallback model
     st.session_state.model_loaded = False
     
     class FallbackModel:
@@ -729,6 +729,9 @@ def refresh_data():
     """Fetch data from ThingSpeak and update session state"""
     data, td, lu, status = fetch_thingspeak_data()
     
+    # Update fetch tracking
+    st.session_state.last_fetch_time = datetime.now()
+    
     if data and data['network_score'] > 0:
         prev = st.session_state.data
         changed = prev is None or any(
@@ -751,7 +754,7 @@ def refresh_data():
         st.session_state.prediction = prediction
         st.session_state.prediction_probability = probability
         
-        # Store in history
+        # Store in history (keep last 100 entries)
         entry = data.copy()
         entry['timestamp'] = datetime.now()
         entry['congestion_prediction'] = prediction
@@ -765,9 +768,15 @@ def refresh_data():
             st.session_state.pulse_triggered = True
             check_and_send_alerts(data, prediction, probability)
         
-        st.session_state.last_update_time = datetime.now()
         return True
-    return False
+    elif data and data['network_score'] == 0:
+        # Data exists but score is 0 - might be initial reading
+        st.session_state.last_refresh = datetime.now()
+        return False
+    else:
+        # No data or offline
+        st.session_state.last_refresh = datetime.now()
+        return False
 
 # -------------------------
 # CSS
@@ -1101,602 +1110,607 @@ st.markdown("""
         color: #5a7a9a;
         margin-top: 4px;
     }
-    
-    .auto-update-badge {
-        display: inline-block;
-        padding: 2px 10px;
-        border-radius: 12px;
-        font-size: 0.6rem;
-        font-family: 'Share Tech Mono', monospace;
-        background: rgba(0, 255, 136, 0.15);
-        color: #00ff88;
-        border: 1px solid rgba(0, 255, 136, 0.2);
-        margin-left: 8px;
-    }
 </style>
 """, unsafe_allow_html=True)
 
 # -------------------------
-# Initial Data Load
+# Auto Refresh Handler
 # -------------------------
-if st.session_state.data is None:
-    refresh_data()
+def handle_auto_refresh():
+    """Handle the auto-refresh logic with 30-second interval"""
+    now = datetime.now()
+    since_refresh = (now - st.session_state.last_refresh).total_seconds()
+    
+    # Check if it's time to refresh
+    if since_refresh >= REFRESH_INTERVAL and st.session_state.auto_refresh:
+        # Check if ThingSpeak likely has new data (every 15 seconds)
+        # We fetch every 30 seconds, so we get every other update
+        refresh_data()
+        st.rerun()
+    
+    # Calculate time until next refresh
+    next_refresh = max(0, REFRESH_INTERVAL - since_refresh)
+    return next_refresh
 
 # -------------------------
-# MAIN APP WITH AUTO-LOOP
+# MAIN APP
 # -------------------------
 def main():
-    # Create a placeholder for the entire app content
-    main_container = st.empty()
+    # Handle auto-refresh
+    next_refresh = handle_auto_refresh()
     
-    # Infinite loop for auto-refresh
-    while True:
-        with main_container.container():
-            # Header
-            model_status = "🤖 AI ACTIVE" if st.session_state.model_loaded else "🤖 AI ACTIVE (FALLBACK)"
-            st.markdown(f"""
-            <div class="netpulse-header">
-                <div class="header-title">ESP8266 NETWORK MONITOR SYSTEM</div>
-                <div class="header-sub">GOOGLE & YOUTUBE · THINGSPEAK LIVE · AI CONGESTION PREDICTION</div>
-                <div class="header-badge">
-                    <span class="pulse-dot"></span>
-                    LIVE · UPDATE #{st.session_state.update_count}
-                    {(' · 🧪 TEST MODE' if st.session_state.test_mode else '')}
-                    {' · ' + model_status}
-                    <span class="auto-update-badge">⏱ {REFRESH_INTERVAL}s AUTO</span>
+    pulse_class = "data-updated" if st.session_state.pulse_triggered else ""
+    st.session_state.pulse_triggered = False
+
+    # Header
+    model_status = "🤖 AI ACTIVE" if st.session_state.model_loaded else "🤖 AI ACTIVE (FALLBACK)"
+    st.markdown(f"""
+    <div class="netpulse-header {pulse_class}">
+        <div class="header-title">ESP8266 NETWORK MONITOR SYSTEM</div>
+        <div class="header-sub">GOOGLE & YOUTUBE · THINGSPEAK LIVE · AI CONGESTION PREDICTION</div>
+        <div class="header-badge">
+            <span class="pulse-dot"></span>
+            LIVE · UPDATE #{st.session_state.update_count}
+            {(' · 🧪 TEST MODE' if st.session_state.test_mode else '')}
+            {' · ' + model_status}
+        </div>
+        <div class="update-counter">⏱ Auto-updates every {REFRESH_INTERVAL}s · Fetched: {st.session_state.fetch_count} times</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Sidebar
+    with st.sidebar:
+        st.markdown("""
+        <div style="font-family:'Orbitron',monospace; font-size:0.7rem; letter-spacing:0.2rem;
+             color:#00f5ff; margin-bottom:1rem; padding-bottom:6px;
+             border-bottom:1px solid rgba(0,245,255,0.15);">
+            ⬡ SYSTEM CONTROLS
+        </div>
+        """, unsafe_allow_html=True)
+
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            auto_refresh = st.toggle("AUTO REFRESH", value=st.session_state.auto_refresh)
+            if auto_refresh != st.session_state.auto_refresh:
+                st.session_state.auto_refresh = auto_refresh
+                st.rerun()
+            st.caption(f"⏱ {REFRESH_INTERVAL}s interval")
+        with col2:
+            if st.button("⟳", help="Refresh Now", use_container_width=True):
+                refresh_data()
+                st.rerun()
+
+        st.markdown('<div class="cyber-divider"></div>', unsafe_allow_html=True)
+
+        # ESP8266 MANUAL IP SECTION
+        st.markdown("""
+        <div style="font-family:'Orbitron',monospace; font-size:0.7rem; letter-spacing:0.15rem;
+             color:#00f5ff; margin-bottom:8px;">
+            🔌 ESP8266 CONTROL
+        </div>
+        """, unsafe_allow_html=True)
+
+        col_ip1, col_ip2 = st.columns([3, 1])
+        with col_ip1:
+            esp_ip_input = st.text_input(
+                "ESP IP Address",
+                value=st.session_state.esp_manual_ip,
+                placeholder="192.168.1.100",
+                key="esp_ip_field",
+                label_visibility="collapsed"
+            )
+            if esp_ip_input:
+                st.session_state.esp_manual_ip = esp_ip_input
+        
+        with col_ip2:
+            if st.button("🔌 CONNECT", use_container_width=True, key="connect_esp"):
+                if st.session_state.esp_manual_ip:
+                    with st.spinner("Connecting..."):
+                        success, msg = test_esp_connection(st.session_state.esp_manual_ip)
+                        if success:
+                            st.session_state.esp_ip = st.session_state.esp_manual_ip
+                            st.session_state.esp_status = 'connected'
+                            st.session_state.esp_last_seen = datetime.now()
+                            st.success("✅ Connected!")
+                            st.rerun()
+                        else:
+                            st.session_state.esp_status = 'disconnected'
+                            st.error(f"❌ {msg}")
+                else:
+                    st.warning("Enter IP first")
+
+        if st.session_state.esp_ip:
+            if st.session_state.esp_status == 'connected':
+                st.markdown(f"""
+                <div class="sidebar-stat">
+                    <span class="status-online" style="font-family:'Share Tech Mono',monospace;">◉ CONNECTED</span>
+                    <span class="sidebar-stat-value">{st.session_state.esp_ip}</span>
                 </div>
-                <div class="update-counter">🔄 Auto-updating every {REFRESH_INTERVAL}s · Fetched: {st.session_state.fetch_count} times · Last: {st.session_state.last_refresh.strftime('%H:%M:%S')}</div>
+                """, unsafe_allow_html=True)
+                
+                col_test, col_clear = st.columns(2)
+                with col_test:
+                    if st.button("🔄 TEST", use_container_width=True):
+                        success, msg = test_esp_connection(st.session_state.esp_ip)
+                        if success:
+                            st.success("✅ Online")
+                            st.session_state.esp_status = 'connected'
+                        else:
+                            st.error(f"❌ {msg}")
+                            st.session_state.esp_status = 'disconnected'
+                with col_clear:
+                    if st.button("🗑 CLEAR", use_container_width=True):
+                        st.session_state.esp_ip = None
+                        st.session_state.esp_status = 'disconnected'
+                        st.session_state.esp_manual_ip = ''
+                        st.rerun()
+            else:
+                st.markdown(f"""
+                <div class="sidebar-stat">
+                    <span class="status-offline" style="font-family:'Share Tech Mono',monospace;">✕ OFFLINE</span>
+                    <span class="sidebar-stat-value">{st.session_state.esp_ip}</span>
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.info("📡 Enter ESP8266 IP and click CONNECT")
+
+        st.markdown('<div class="cyber-divider"></div>', unsafe_allow_html=True)
+
+        # Network Test Panel
+        if st.session_state.esp_ip and st.session_state.esp_status == 'connected':
+            st.markdown("""
+            <div style="font-family:'Orbitron',monospace; font-size:0.7rem; letter-spacing:0.15rem;
+                 color:#00f5ff; margin-bottom:8px;">
+                🧪 NETWORK TEST
+            </div>
+            """, unsafe_allow_html=True)
+            
+            if st.session_state.test_mode:
+                st.warning(f"🧪 {TEST_SCENARIOS[st.session_state.test_scenario]['name']}")
+            
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("🎬 YouTube Degrade", use_container_width=True):
+                    success, msg = apply_test_scenario('youtube_degraded')
+                    if success:
+                        st.success("✅ YouTube test active")
+                        refresh_data()
+                        st.rerun()
+                    else:
+                        st.error(f"❌ {msg}")
+                
+                if st.button("🔍 Google Degrade", use_container_width=True):
+                    success, msg = apply_test_scenario('google_degraded')
+                    if success:
+                        st.success("✅ Google test active")
+                        refresh_data()
+                        st.rerun()
+                    else:
+                        st.error(f"❌ {msg}")
+            
+            with c2:
+                if st.button("⚠️ Both Degrade", use_container_width=True):
+                    success, msg = apply_test_scenario('both_degraded')
+                    if success:
+                        st.success("✅ Both test active")
+                        refresh_data()
+                        st.rerun()
+                    else:
+                        st.error(f"❌ {msg}")
+                
+                if st.button("✅ Normal Mode", use_container_width=True):
+                    success, msg = apply_test_scenario('recovery')
+                    if success:
+                        st.success("✅ Normal mode restored")
+                        refresh_data()
+                        st.rerun()
+                    else:
+                        st.error(f"❌ {msg}")
+            
+            st.markdown('<div class="cyber-divider"></div>', unsafe_allow_html=True)
+
+        # Email Settings
+        st.markdown("""
+        <div style="font-family:'Orbitron',monospace; font-size:0.7rem; letter-spacing:0.15rem;
+             color:#00f5ff; margin-bottom:8px;">
+            ✉ ALERTS
+        </div>
+        """, unsafe_allow_html=True)
+        
+        with st.expander("📧 Email Config", expanded=False):
+            st.caption(f"Recipient: {EMAIL_CONFIG['recipient_email']}")
+            if st.button("📧 TEST EMAIL", use_container_width=True):
+                success, msg = test_email_connection()
+                if success:
+                    send_email_notification("Test", "<div class='good'>✅ ESP8266 NETWORK MONITOR SYSTEM Test OK</div>", "test")
+                    st.success("Test email sent!")
+                else:
+                    st.error(f"❌ {msg}")
+
+        st.markdown('<div class="cyber-divider"></div>', unsafe_allow_html=True)
+
+        # Timer
+        if st.session_state.auto_refresh:
+            st.markdown(f"""
+            <div class="sidebar-stat">
+                <span class="sidebar-stat-label">⏱ NEXT UPDATE</span>
+                <span class="sidebar-stat-value">{int(next_refresh)}s</span>
+            </div>
+            <div class="sidebar-stat">
+                <span class="sidebar-stat-label">🔄 FETCHES</span>
+                <span class="sidebar-stat-value">{st.session_state.fetch_count}</span>
             </div>
             """, unsafe_allow_html=True)
 
-            # Sidebar
-            with st.sidebar:
-                st.markdown("""
-                <div style="font-family:'Orbitron',monospace; font-size:0.7rem; letter-spacing:0.2rem;
-                     color:#00f5ff; margin-bottom:1rem; padding-bottom:6px;
-                     border-bottom:1px solid rgba(0,245,255,0.15);">
-                    ⬡ SYSTEM CONTROLS
-                </div>
-                """, unsafe_allow_html=True)
-
-                col1, col2 = st.columns([3, 1])
-                with col1:
-                    auto_refresh = st.toggle("AUTO REFRESH", value=st.session_state.auto_refresh)
-                    if auto_refresh != st.session_state.auto_refresh:
-                        st.session_state.auto_refresh = auto_refresh
-                    st.caption(f"⏱ {REFRESH_INTERVAL}s interval")
-                with col2:
-                    if st.button("⟳", help="Refresh Now", use_container_width=True):
-                        refresh_data()
-
-                st.markdown('<div class="cyber-divider"></div>', unsafe_allow_html=True)
-
-                # ESP8266 MANUAL IP SECTION
-                st.markdown("""
-                <div style="font-family:'Orbitron',monospace; font-size:0.7rem; letter-spacing:0.15rem;
-                     color:#00f5ff; margin-bottom:8px;">
-                    🔌 ESP8266 CONTROL
-                </div>
-                """, unsafe_allow_html=True)
-
-                col_ip1, col_ip2 = st.columns([3, 1])
-                with col_ip1:
-                    esp_ip_input = st.text_input(
-                        "ESP IP Address",
-                        value=st.session_state.esp_manual_ip,
-                        placeholder="192.168.1.100",
-                        key="esp_ip_field",
-                        label_visibility="collapsed"
-                    )
-                    if esp_ip_input:
-                        st.session_state.esp_manual_ip = esp_ip_input
-                
-                with col_ip2:
-                    if st.button("🔌 CONNECT", use_container_width=True, key="connect_esp"):
-                        if st.session_state.esp_manual_ip:
-                            with st.spinner("Connecting..."):
-                                success, msg = test_esp_connection(st.session_state.esp_manual_ip)
-                                if success:
-                                    st.session_state.esp_ip = st.session_state.esp_manual_ip
-                                    st.session_state.esp_status = 'connected'
-                                    st.session_state.esp_last_seen = datetime.now()
-                                    st.success("✅ Connected!")
-                                else:
-                                    st.session_state.esp_status = 'disconnected'
-                                    st.error(f"❌ {msg}")
-                        else:
-                            st.warning("Enter IP first")
-
-                if st.session_state.esp_ip:
-                    if st.session_state.esp_status == 'connected':
-                        st.markdown(f"""
-                        <div class="sidebar-stat">
-                            <span class="status-online" style="font-family:'Share Tech Mono',monospace;">◉ CONNECTED</span>
-                            <span class="sidebar-stat-value">{st.session_state.esp_ip}</span>
-                        </div>
-                        """, unsafe_allow_html=True)
-                        
-                        col_test, col_clear = st.columns(2)
-                        with col_test:
-                            if st.button("🔄 TEST", use_container_width=True):
-                                success, msg = test_esp_connection(st.session_state.esp_ip)
-                                if success:
-                                    st.success("✅ Online")
-                                    st.session_state.esp_status = 'connected'
-                                else:
-                                    st.error(f"❌ {msg}")
-                                    st.session_state.esp_status = 'disconnected'
-                        with col_clear:
-                            if st.button("🗑 CLEAR", use_container_width=True):
-                                st.session_state.esp_ip = None
-                                st.session_state.esp_status = 'disconnected'
-                                st.session_state.esp_manual_ip = ''
-                    else:
-                        st.markdown(f"""
-                        <div class="sidebar-stat">
-                            <span class="status-offline" style="font-family:'Share Tech Mono',monospace;">✕ OFFLINE</span>
-                            <span class="sidebar-stat-value">{st.session_state.esp_ip}</span>
-                        </div>
-                        """, unsafe_allow_html=True)
-                else:
-                    st.info("📡 Enter ESP8266 IP and click CONNECT")
-
-                st.markdown('<div class="cyber-divider"></div>', unsafe_allow_html=True)
-
-                # Network Test Panel
-                if st.session_state.esp_ip and st.session_state.esp_status == 'connected':
-                    st.markdown("""
-                    <div style="font-family:'Orbitron',monospace; font-size:0.7rem; letter-spacing:0.15rem;
-                         color:#00f5ff; margin-bottom:8px;">
-                        🧪 NETWORK TEST
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    if st.session_state.test_mode:
-                        st.warning(f"🧪 {TEST_SCENARIOS[st.session_state.test_scenario]['name']}")
-                    
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        if st.button("🎬 YouTube Degrade", use_container_width=True):
-                            success, msg = apply_test_scenario('youtube_degraded')
-                            if success:
-                                st.success("✅ YouTube test active")
-                                refresh_data()
-                            else:
-                                st.error(f"❌ {msg}")
-                        
-                        if st.button("🔍 Google Degrade", use_container_width=True):
-                            success, msg = apply_test_scenario('google_degraded')
-                            if success:
-                                st.success("✅ Google test active")
-                                refresh_data()
-                            else:
-                                st.error(f"❌ {msg}")
-                    
-                    with c2:
-                        if st.button("⚠️ Both Degrade", use_container_width=True):
-                            success, msg = apply_test_scenario('both_degraded')
-                            if success:
-                                st.success("✅ Both test active")
-                                refresh_data()
-                            else:
-                                st.error(f"❌ {msg}")
-                        
-                        if st.button("✅ Normal Mode", use_container_width=True):
-                            success, msg = apply_test_scenario('recovery')
-                            if success:
-                                st.success("✅ Normal mode restored")
-                                refresh_data()
-                            else:
-                                st.error(f"❌ {msg}")
-                    
-                    st.markdown('<div class="cyber-divider"></div>', unsafe_allow_html=True)
-
-                # Email Settings
-                st.markdown("""
-                <div style="font-family:'Orbitron',monospace; font-size:0.7rem; letter-spacing:0.15rem;
-                     color:#00f5ff; margin-bottom:8px;">
-                    ✉ ALERTS
-                </div>
-                """, unsafe_allow_html=True)
-                
-                with st.expander("📧 Email Config", expanded=False):
-                    st.caption(f"Recipient: {EMAIL_CONFIG['recipient_email']}")
-                    if st.button("📧 TEST EMAIL", use_container_width=True):
-                        success, msg = test_email_connection()
-                        if success:
-                            send_email_notification("Test", "<div class='good'>✅ ESP8266 NETWORK MONITOR SYSTEM Test OK</div>", "test")
-                            st.success("Test email sent!")
-                        else:
-                            st.error(f"❌ {msg}")
-
-                st.markdown('<div class="cyber-divider"></div>', unsafe_allow_html=True)
-
-                # Timer
-                if st.session_state.auto_refresh:
-                    # Calculate time since last refresh
-                    time_since = (datetime.now() - st.session_state.last_refresh).total_seconds()
-                    next_refresh = max(0, REFRESH_INTERVAL - time_since)
-                    st.markdown(f"""
-                    <div class="sidebar-stat">
-                        <span class="sidebar-stat-label">⏱ NEXT UPDATE</span>
-                        <span class="sidebar-stat-value">{int(next_refresh)}s</span>
-                    </div>
-                    <div class="sidebar-stat">
-                        <span class="sidebar-stat-label">🔄 FETCHES</span>
-                        <span class="sidebar-stat-value">{st.session_state.fetch_count}</span>
-                    </div>
-                    """, unsafe_allow_html=True)
-
-                # ThingSpeak Status
-                status = st.session_state.status
-                td = st.session_state.time_diff
-                status_map = {
-                    'online': ('status-online', '◉ ONLINE', '#00ff88'),
-                    'recent': ('status-online', '◎ RECENT', '#00f5ff'),
-                    'stale': ('status-stale', '◌ STALE', '#ffaa00'),
-                    'offline': ('status-offline', '✕ OFFLINE', '#ff003c'),
-                }
-                sc, sl, scolor = status_map.get(status, ('status-offline', '✕ OFFLINE', '#ff003c'))
-                
-                last_update_str = format_time_diff(td) if td else "—"
-                st.markdown(f"""
-                <div class="sidebar-stat">
-                    <span class="{sc}" style="font-family:'Share Tech Mono',monospace;">{sl}</span>
-                    <span class="sidebar-stat-label" style="color:{scolor};">{last_update_str}</span>
-                </div>
-                """, unsafe_allow_html=True)
-
-                st.markdown('<div class="cyber-divider"></div>', unsafe_allow_html=True)
-                
-                # Stats
-                hist_data = st.session_state.history_data
-                if hist_data:
-                    st.markdown("""<div style="font-family:'Orbitron',monospace; font-size:0.65rem; color:#5a7a9a;">⬡ STATS</div>""", unsafe_allow_html=True)
-                    st.metric("RECORDS", len(hist_data))
-                    avg_score = np.mean([d['network_score'] for d in hist_data])
-                    st.metric("AVG SCORE", f"{avg_score:.0f}/100")
-                
-                st.caption(f"🕒 {st.session_state.last_refresh.strftime('%H:%M:%S')}")
-
-            # TABS
-            tab1, tab2, tab3, tab4 = st.tabs(["🛰 LIVE DASHBOARD", "📊 HISTORICAL", "🔍 DIAGNOSTICS", "📝 LOGS"])
-
-            # TAB 1 - LIVE DASHBOARD
-            with tab1:
-                data = st.session_state.data
-                
-                if st.session_state.test_mode:
-                    scenario = TEST_SCENARIOS[st.session_state.test_scenario]
-                    st.markdown(f'<div class="test-banner">🧪 {scenario["name"]}<br><small>{scenario["description"]}</small></div>', unsafe_allow_html=True)
-
-                if data and data['network_score'] > 0:
-                    ns = data['network_score']
-                    nc = score_color(ns)
-                    network_status = data['network_status']
-                    
-                    col_score, col_pred = st.columns([1, 1.2], gap="large")
-                    
-                    with col_score:
-                        st.markdown(f"""
-                        <div class="score-ring-wrap">
-                            <div class="score-label">NETWORK HEALTH</div>
-                            <div class="score-number" style="color:{nc};">{ns:.0f}</div>
-                            <div class="score-label">/ 100</div>
-                            <div class="score-status" style="color:{nc};">{network_status}</div>
-                            <div style="margin-top:12px;">{data['combined_speed']:.1f} MBPS</div>
-                            <div style="margin-top:6px; font-size:0.6rem; color:#5a7a9a;">Updated: {st.session_state.last_refresh.strftime('%H:%M:%S')}</div>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    
-                    with col_pred:
-                        if st.session_state.prediction is not None:
-                            pred = st.session_state.prediction
-                            prob = st.session_state.prediction_probability if st.session_state.prediction_probability else 0
-                            risk_level, risk_color, risk_msg = get_congestion_risk_level(prob)
-                            
-                            if pred == 1:
-                                st.markdown(f"""
-                                <div class="prediction-card" style="border: 1px solid {risk_color};">
-                                    <div class="prediction-risk" style="color:{risk_color};">
-                                        ⚠️ CONGESTION PREDICTED
-                                    </div>
-                                    <div class="prediction-message">
-                                        🤖 AI Model Confidence: {prob*100:.1f}%<br>
-                                        Risk Level: <span style="color:{risk_color}; font-weight:bold;">{risk_level}</span><br>
-                                        {risk_msg}
-                                    </div>
-                                </div>
-                                """, unsafe_allow_html=True)
-                            else:
-                                st.markdown(f"""
-                                <div class="prediction-card" style="border: 1px solid {risk_color};">
-                                    <div class="prediction-risk" style="color:{risk_color};">
-                                        ✓ NO CONGESTION PREDICTED
-                                    </div>
-                                    <div class="prediction-message">
-                                        🤖 AI Model Confidence: {prob*100:.1f}%<br>
-                                        Risk Level: <span style="color:{risk_color}; font-weight:bold;">{risk_level}</span><br>
-                                        {risk_msg}
-                                    </div>
-                                </div>
-                                """, unsafe_allow_html=True)
-                        else:
-                            st.markdown("""
-                            <div class="prediction-card">
-                                <div class="prediction-risk" style="color:#5a7a9a;">
-                                    🤖 AI MODEL
-                                </div>
-                                <div class="prediction-message">
-                                    Waiting for data to run congestion prediction...
-                                </div>
-                            </div>
-                            """, unsafe_allow_html=True)
-                        
-                        m1, m2, m3 = st.columns(3)
-                        with m1:
-                            st.metric("GOOGLE", f"{data['google_quality']}/100")
-                        with m2:
-                            st.metric("YOUTUBE", f"{data['youtube_quality']}/100")
-                        with m3:
-                            st.metric("SPEED", f"{data['combined_speed']:.0f} Mbps")
-                    
-                    st.markdown('<div class="cyber-divider"></div>', unsafe_allow_html=True)
-                    
-                    col_g, col_y = st.columns(2)
-                    
-                    with col_g:
-                        gq = data['google_quality']
-                        gqc = score_color(gq)
-                        st.markdown(f"""
-                        <div class="svc-panel" style="border-top:3px solid #4285f4;">
-                            <div class="svc-title" style="color:#4285f4;">🔍 GOOGLE</div>
-                            <div class="quality-bar-track">
-                                <div class="quality-bar-fill" style="width:{gq}%; background:{gqc};"></div>
-                            </div>
-                            <div class="metric-row">
-                                <div class="metric-cell"><div class="metric-cell-label">LATENCY</div><div class="metric-cell-value">{data['google_latency']:.0f}<span class="metric-cell-unit">ms</span></div></div>
-                                <div class="metric-cell"><div class="metric-cell-label">LOSS</div><div class="metric-cell-value">{data['google_packet_loss']:.1f}<span class="metric-cell-unit">%</span></div></div>
-                                <div class="metric-cell"><div class="metric-cell-label">BW</div><div class="metric-cell-value">{data['google_bandwidth']:.0f}<span class="metric-cell-unit">Mbps</span></div></div>
-                            </div>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    
-                    with col_y:
-                        yq = data['youtube_quality']
-                        yqc = score_color(yq)
-                        st.markdown(f"""
-                        <div class="svc-panel" style="border-top:3px solid #ff4444;">
-                            <div class="svc-title" style="color:#ff4444;">▶ YOUTUBE</div>
-                            <div class="quality-bar-track">
-                                <div class="quality-bar-fill" style="width:{yq}%; background:{yqc};"></div>
-                            </div>
-                            <div class="metric-row">
-                                <div class="metric-cell"><div class="metric-cell-label">LATENCY</div><div class="metric-cell-value">{data['youtube_latency']:.0f}<span class="metric-cell-unit">ms</span></div></div>
-                                <div class="metric-cell"><div class="metric-cell-label">LOSS</div><div class="metric-cell-value">{data['youtube_packet_loss']:.1f}<span class="metric-cell-unit">%</span></div></div>
-                                <div class="metric-cell"><div class="metric-cell-label">BW</div><div class="metric-cell-value">{data['youtube_bandwidth']:.0f}<span class="metric-cell-unit">Mbps</span></div></div>
-                            </div>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    
-                    st.markdown('<div class="cyber-divider"></div>', unsafe_allow_html=True)
-                    
-                    st.markdown("### 💡 RECOMMENDATIONS")
-                    for rec in generate_recommendations(data):
-                        cls = rec['severity']
-                        icon = {'critical':'⚠', 'warning':'◈', 'good':'✓'}.get(cls, '◎')
-                        st.markdown(f'<div class="alert-{cls}"><strong>[{rec["service"]}]</strong> {icon} {rec["message"]}</div>', unsafe_allow_html=True)
-                
-                elif data and data['network_score'] == 0:
-                    st.warning("⚠ Device active - awaiting valid reading")
-                else:
-                    st.info("📡 Waiting for ThingSpeak data...")
-
-            # TAB 2 - HISTORICAL
-            with tab2:
-                st.markdown("### 📊 HISTORICAL DATA & PREDICTIONS")
-                st.caption(f"📡 Auto-updates every {REFRESH_INTERVAL}s · Showing last 100 records")
-                hist_data = st.session_state.history_data
-                
-                if hist_data:
-                    df = pd.DataFrame(hist_data)
-                    df['timestamp'] = pd.to_datetime(df['timestamp'])
-                    
-                    fig = go.Figure()
-                    
-                    fig.add_trace(go.Scatter(x=df['timestamp'], y=df['network_score'], 
-                                            mode='lines+markers', name='Network Score', 
-                                            line=dict(color='#00f5ff', width=2),
-                                            marker=dict(size=4)))
-                    
-                    fig.add_trace(go.Scatter(x=df['timestamp'], y=df['combined_speed'], 
-                                            mode='lines', name='Speed (Mbps)', 
-                                            yaxis='y2', line=dict(color='#00ff88', width=1.5)))
-                    
-                    if 'congestion_prediction' in df.columns:
-                        pred_data = df[df['congestion_prediction'] == 1]
-                        if not pred_data.empty:
-                            fig.add_trace(go.Scatter(x=pred_data['timestamp'], y=pred_data['network_score'],
-                                                    mode='markers', name='⚠️ Congestion Predicted',
-                                                    marker=dict(size=12, color='#ff003c', symbol='x'),
-                                                    yaxis='y'))
-                    
-                    fig.update_layout(
-                        title="Network Metrics & AI Predictions Over Time",
-                        xaxis=dict(gridcolor='rgba(0,245,255,0.05)'),
-                        yaxis=dict(title='Score', range=[0, 100], gridcolor='rgba(0,245,255,0.05)'),
-                        yaxis2=dict(title='Speed (Mbps)', overlaying='y', side='right'),
-                        template='plotly_dark', height=400,
-                        plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)'
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-                    
-                    display_cols = ['timestamp', 'network_score', 'network_status', 'combined_speed']
-                    if 'congestion_prediction' in df.columns:
-                        df['congestion'] = df['congestion_prediction'].map({0: 'No', 1: '⚠️ Yes'})
-                        display_cols.append('congestion')
-                    if 'prediction_probability' in df.columns:
-                        display_cols.append('prediction_probability')
-                    
-                    st.dataframe(df[display_cols].tail(20), use_container_width=True)
-                    
-                    csv = df.to_csv(index=False)
-                    st.download_button("📥 Export CSV", csv, "netpulse_data.csv", "text/csv")
-                else:
-                    st.info("No historical data yet")
-
-            # TAB 3 - DIAGNOSTICS
-            with tab3:
-                st.markdown("### 🔍 NETWORK DIAGNOSTICS & ANALYSIS")
-                
-                data = st.session_state.data
-                
-                if data and data['network_score'] > 0:
-                    health_scores = get_network_health_score(data)
-                    
-                    col1, col2, col3, col4 = st.columns(4)
-                    with col1:
-                        st.metric("📡 Latency Health", f"{health_scores.get('latency', 0):.0f}/100")
-                    with col2:
-                        st.metric("📦 Packet Loss Health", f"{health_scores.get('packet_loss', 0):.0f}/100")
-                    with col3:
-                        st.metric("⚡ Bandwidth Health", f"{health_scores.get('bandwidth', 0):.0f}/100")
-                    with col4:
-                        st.metric("🔒 Stability Health", f"{health_scores.get('stability', 0):.0f}/100")
-                    
-                    st.markdown('<div class="cyber-divider"></div>', unsafe_allow_html=True)
-                    
-                    overall = health_scores.get('overall', 0)
-                    st.markdown(f"""
-                    <div class="diagnostic-card">
-                        <div style="font-family:'Orbitron',monospace; font-size:0.9rem; margin-bottom:10px;">
-                            🩺 OVERALL NETWORK HEALTH: {overall:.0f}/100
-                        </div>
-                        <div class="health-meter">
-                            <div style="width:{overall}%; height:100%; background: linear-gradient(90deg, #00ff88, #00f5ff); border-radius:4px;"></div>
-                        </div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    st.markdown("### 📋 DIAGNOSTIC REPORT")
-                    diagnostics = analyze_network_performance(data)
-                    
-                    if diagnostics:
-                        for diag in diagnostics:
-                            severity_color = {
-                                'critical': '#ff003c',
-                                'warning': '#ff6b00',
-                                'good': '#00ff88'
-                            }.get(diag['severity'], '#00f5ff')
-                            
-                            st.markdown(f"""
-                            <div class="diagnostic-card" style="border-left: 3px solid {severity_color};">
-                                <div style="display: flex; justify-content: space-between; align-items: center;">
-                                    <strong style="color:{severity_color};">⚠️ {diag['category']}</strong>
-                                    <span style="color:#5a7a9a; font-size:0.7rem;">Value: {diag['metric_value']:.1f}</span>
-                                </div>
-                                <div style="margin: 8px 0; color: #a0b8cc;">{diag['message']}</div>
-                                <div style="font-size:0.8rem; color: #00f5ff;">💡 Solution: {diag['solution']}</div>
-                            </div>
-                            """, unsafe_allow_html=True)
-                    else:
-                        st.markdown("""
-                        <div class="diagnostic-card" style="border-left: 3px solid #00ff88;">
-                            <strong style="color:#00ff88;">✅ ALL SYSTEMS NOMINAL</strong>
-                            <div style="margin: 8px 0; color: #a0b8cc;">No critical issues detected. Network performance is within acceptable parameters.</div>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    
-                    st.markdown('<div class="cyber-divider"></div>', unsafe_allow_html=True)
-                    st.markdown("### 📈 HISTORICAL PERFORMANCE ANALYSIS")
-                    
-                    hist_data = st.session_state.history_data
-                    if hist_data and len(hist_data) >= 2:
-                        perf_metrics = get_performance_metrics(hist_data)
-                        
-                        col_a, col_b, col_c, col_d = st.columns(4)
-                        with col_a:
-                            st.metric("📊 Avg Score", f"{perf_metrics.get('avg_score', 0):.0f}/100")
-                        with col_b:
-                            st.metric("📉 Min Score", f"{perf_metrics.get('min_score', 0):.0f}/100")
-                        with col_c:
-                            st.metric("📈 Max Score", f"{perf_metrics.get('max_score', 0):.0f}/100")
-                        with col_d:
-                            trend_icon = "📈" if perf_metrics.get('trend') == 'improving' else "📉"
-                            trend_color = "#00ff88" if perf_metrics.get('trend') == 'improving' else "#ff6b00"
-                            st.markdown(f"""
-                            <div style="background:rgba(0,0,0,0.25); border-radius:8px; padding:0.5rem;">
-                                <div style="font-family:'Share Tech Mono',monospace; font-size:0.7rem; color:#7a9abc;">TREND</div>
-                                <div style="font-family:'Orbitron',monospace; font-size:1.2rem; color:{trend_color};">{trend_icon} {perf_metrics.get('trend', 'stable').upper()}</div>
-                            </div>
-                            """, unsafe_allow_html=True)
-                        
-                        st.markdown(f"""
-                        <div class="diagnostic-card">
-                            <strong>📊 Performance Summary</strong><br>
-                            • Congestion Rate: {perf_metrics.get('congestion_rate', 0):.1f}% of monitored periods<br>
-                            • Score Stability: ±{perf_metrics.get('std_dev', 0):.1f} points deviation<br>
-                            • Network consistency is {'stable' if perf_metrics.get('std_dev', 0) < 15 else 'volatile'}
-                        </div>
-                        """, unsafe_allow_html=True)
-                    
-                    st.markdown('<div class="cyber-divider"></div>', unsafe_allow_html=True)
-                    st.markdown("### 🛠 QUICK ACTIONS")
-                    
-                    col_q1, col_q2, col_q3 = st.columns(3)
-                    with col_q1:
-                        if st.button("🔄 Force Refresh", use_container_width=True):
-                            refresh_data()
-                    with col_q2:
-                        if st.button("📧 Send Diagnostic Report", use_container_width=True):
-                            diagnostics = analyze_network_performance(data)
-                            diagnostic_text = "\n".join([f"- {d['category']}: {d['message']}" for d in diagnostics[:5]])
-                            send_email_notification(
-                                "Diagnostic Report",
-                                f"Network Score: {data['network_score']:.0f}/100\n\nIssues Found:\n{diagnostic_text}",
-                                "diagnostic"
-                            )
-                            st.success("Diagnostic report sent!")
-                    with col_q3:
-                        if st.button("🗑 Clear History", use_container_width=True):
-                            st.session_state.history_data = []
-                            st.success("History cleared!")
-                else:
-                    st.info("📡 Waiting for network data to perform diagnostics...")
-
-            # TAB 4 - LOGS
-            with tab4:
-                st.markdown("### 📝 SYSTEM LOGS")
-                st.caption(f"📡 Auto-updates every {REFRESH_INTERVAL}s · Last {len(st.session_state.history_data)} records")
-                st.info("📡 Logs are stored in memory only. Recent activity shown below.")
-                
-                if st.session_state.history_data:
-                    recent_entries = st.session_state.history_data[-20:]
-                    for entry in reversed(recent_entries):
-                        ts = entry.get('timestamp', datetime.now()).strftime('%H:%M:%S')
-                        score = entry.get('network_score', 0)
-                        status = entry.get('network_status', 'UNKNOWN')
-                        pred = entry.get('congestion_prediction', 0)
-                        pred_text = "⚠️ Congestion" if pred == 1 else "✅ Normal"
-                        
-                        st.markdown(f"""
-                        <div style="background:rgba(0,0,0,0.2); border-left:2px solid {score_color(score)}; padding:6px 12px; margin:4px 0;">
-                            <span style="color:#5a7a9a; font-size:0.7rem;">{ts}</span>
-                            <strong style="color:{score_color(score)};"> [NETWORK]</strong>
-                            <span style="color:#a0b8cc;">Score: {score:.0f}/100 | {status} | {pred_text}</span>
-                            <span style="color:#5a7a9a; font-size:0.6rem; margin-left:8px;">#{st.session_state.fetch_count}</span>
-                        </div>
-                        """, unsafe_allow_html=True)
-                else:
-                    st.info("No history yet - waiting for data")
-
-        # Wait for refresh interval, but only if auto-refresh is enabled
-        if st.session_state.auto_refresh:
-            time.sleep(REFRESH_INTERVAL)
+        # ThingSpeak Status
+        if st.session_state.data is None:
             refresh_data()
+        
+        status = st.session_state.status
+        td = st.session_state.time_diff
+        status_map = {
+            'online': ('status-online', '◉ ONLINE', '#00ff88'),
+            'recent': ('status-online', '◎ RECENT', '#00f5ff'),
+            'stale': ('status-stale', '◌ STALE', '#ffaa00'),
+            'offline': ('status-offline', '✕ OFFLINE', '#ff003c'),
+        }
+        sc, sl, scolor = status_map.get(status, ('status-offline', '✕ OFFLINE', '#ff003c'))
+        
+        # Show time since last ThingSpeak update
+        last_update_str = format_time_diff(td) if td else "—"
+        st.markdown(f"""
+        <div class="sidebar-stat">
+            <span class="{sc}" style="font-family:'Share Tech Mono',monospace;">{sl}</span>
+            <span class="sidebar-stat-label" style="color:{scolor};">{last_update_str}</span>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.markdown('<div class="cyber-divider"></div>', unsafe_allow_html=True)
+        
+        # Stats
+        hist_data = st.session_state.history_data
+        if hist_data:
+            st.markdown("""<div style="font-family:'Orbitron',monospace; font-size:0.65rem; color:#5a7a9a;">⬡ STATS</div>""", unsafe_allow_html=True)
+            st.metric("RECORDS", len(hist_data))
+            avg_score = np.mean([d['network_score'] for d in hist_data])
+            st.metric("AVG SCORE", f"{avg_score:.0f}/100")
+        
+        st.caption(f"🕒 {st.session_state.last_refresh.strftime('%H:%M:%S')}")
+
+    # TABS
+    tab1, tab2, tab3, tab4 = st.tabs(["🛰 LIVE DASHBOARD", "📊 HISTORICAL", "🔍 DIAGNOSTICS", "📝 LOGS"])
+
+    # TAB 1 - LIVE DASHBOARD
+    with tab1:
+        data = st.session_state.data
+        
+        if st.session_state.test_mode:
+            scenario = TEST_SCENARIOS[st.session_state.test_scenario]
+            st.markdown(f'<div class="test-banner">🧪 {scenario["name"]}<br><small>{scenario["description"]}</small></div>', unsafe_allow_html=True)
+
+        if data and data['network_score'] > 0:
+            ns = data['network_score']
+            nc = score_color(ns)
+            network_status = data['network_status']
+            
+            col_score, col_pred = st.columns([1, 1.2], gap="large")
+            
+            with col_score:
+                st.markdown(f"""
+                <div class="score-ring-wrap">
+                    <div class="score-label">NETWORK HEALTH</div>
+                    <div class="score-number" style="color:{nc};">{ns:.0f}</div>
+                    <div class="score-label">/ 100</div>
+                    <div class="score-status" style="color:{nc};">{network_status}</div>
+                    <div style="margin-top:12px;">{data['combined_speed']:.1f} MBPS</div>
+                    <div style="margin-top:6px; font-size:0.6rem; color:#5a7a9a;">Updated: {st.session_state.last_refresh.strftime('%H:%M:%S')}</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col_pred:
+                if st.session_state.prediction is not None:
+                    pred = st.session_state.prediction
+                    prob = st.session_state.prediction_probability if st.session_state.prediction_probability else 0
+                    risk_level, risk_color, risk_msg = get_congestion_risk_level(prob)
+                    
+                    if pred == 1:
+                        st.markdown(f"""
+                        <div class="prediction-card" style="border: 1px solid {risk_color};">
+                            <div class="prediction-risk" style="color:{risk_color};">
+                                ⚠️ CONGESTION PREDICTED
+                            </div>
+                            <div class="prediction-message">
+                                🤖 AI Model Confidence: {prob*100:.1f}%<br>
+                                Risk Level: <span style="color:{risk_color}; font-weight:bold;">{risk_level}</span><br>
+                                {risk_msg}
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    else:
+                        st.markdown(f"""
+                        <div class="prediction-card" style="border: 1px solid {risk_color};">
+                            <div class="prediction-risk" style="color:{risk_color};">
+                                ✓ NO CONGESTION PREDICTED
+                            </div>
+                            <div class="prediction-message">
+                                🤖 AI Model Confidence: {prob*100:.1f}%<br>
+                                Risk Level: <span style="color:{risk_color}; font-weight:bold;">{risk_level}</span><br>
+                                {risk_msg}
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                else:
+                    st.markdown("""
+                    <div class="prediction-card">
+                        <div class="prediction-risk" style="color:#5a7a9a;">
+                            🤖 AI MODEL
+                        </div>
+                        <div class="prediction-message">
+                            Waiting for data to run congestion prediction...
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                m1, m2, m3 = st.columns(3)
+                with m1:
+                    st.metric("GOOGLE", f"{data['google_quality']}/100")
+                with m2:
+                    st.metric("YOUTUBE", f"{data['youtube_quality']}/100")
+                with m3:
+                    st.metric("SPEED", f"{data['combined_speed']:.0f} Mbps")
+            
+            st.markdown('<div class="cyber-divider"></div>', unsafe_allow_html=True)
+            
+            col_g, col_y = st.columns(2)
+            
+            with col_g:
+                gq = data['google_quality']
+                gqc = score_color(gq)
+                st.markdown(f"""
+                <div class="svc-panel" style="border-top:3px solid #4285f4;">
+                    <div class="svc-title" style="color:#4285f4;">🔍 GOOGLE</div>
+                    <div class="quality-bar-track">
+                        <div class="quality-bar-fill" style="width:{gq}%; background:{gqc};"></div>
+                    </div>
+                    <div class="metric-row">
+                        <div class="metric-cell"><div class="metric-cell-label">LATENCY</div><div class="metric-cell-value">{data['google_latency']:.0f}<span class="metric-cell-unit">ms</span></div></div>
+                        <div class="metric-cell"><div class="metric-cell-label">LOSS</div><div class="metric-cell-value">{data['google_packet_loss']:.1f}<span class="metric-cell-unit">%</span></div></div>
+                        <div class="metric-cell"><div class="metric-cell-label">BW</div><div class="metric-cell-value">{data['google_bandwidth']:.0f}<span class="metric-cell-unit">Mbps</span></div></div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col_y:
+                yq = data['youtube_quality']
+                yqc = score_color(yq)
+                st.markdown(f"""
+                <div class="svc-panel" style="border-top:3px solid #ff4444;">
+                    <div class="svc-title" style="color:#ff4444;">▶ YOUTUBE</div>
+                    <div class="quality-bar-track">
+                        <div class="quality-bar-fill" style="width:{yq}%; background:{yqc};"></div>
+                    </div>
+                    <div class="metric-row">
+                        <div class="metric-cell"><div class="metric-cell-label">LATENCY</div><div class="metric-cell-value">{data['youtube_latency']:.0f}<span class="metric-cell-unit">ms</span></div></div>
+                        <div class="metric-cell"><div class="metric-cell-label">LOSS</div><div class="metric-cell-value">{data['youtube_packet_loss']:.1f}<span class="metric-cell-unit">%</span></div></div>
+                        <div class="metric-cell"><div class="metric-cell-label">BW</div><div class="metric-cell-value">{data['youtube_bandwidth']:.0f}<span class="metric-cell-unit">Mbps</span></div></div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            st.markdown('<div class="cyber-divider"></div>', unsafe_allow_html=True)
+            
+            st.markdown("### 💡 RECOMMENDATIONS")
+            for rec in generate_recommendations(data):
+                cls = rec['severity']
+                icon = {'critical':'⚠', 'warning':'◈', 'good':'✓'}.get(cls, '◎')
+                st.markdown(f'<div class="alert-{cls}"><strong>[{rec["service"]}]</strong> {icon} {rec["message"]}</div>', unsafe_allow_html=True)
+        
+        elif data and data['network_score'] == 0:
+            st.warning("⚠ Device active - awaiting valid reading")
         else:
-            # If auto-refresh is disabled, wait a bit and check again
-            time.sleep(5)
+            st.info("📡 Waiting for ThingSpeak data...")
+
+    # TAB 2 - HISTORICAL
+    with tab2:
+        st.markdown("### 📊 HISTORICAL DATA & PREDICTIONS")
+        st.caption(f"📡 Auto-updates every {REFRESH_INTERVAL}s · Showing last 100 records")
+        hist_data = st.session_state.history_data
+        
+        if hist_data:
+            df = pd.DataFrame(hist_data)
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            
+            fig = go.Figure()
+            
+            fig.add_trace(go.Scatter(x=df['timestamp'], y=df['network_score'], 
+                                    mode='lines+markers', name='Network Score', 
+                                    line=dict(color='#00f5ff', width=2),
+                                    marker=dict(size=4)))
+            
+            fig.add_trace(go.Scatter(x=df['timestamp'], y=df['combined_speed'], 
+                                    mode='lines', name='Speed (Mbps)', 
+                                    yaxis='y2', line=dict(color='#00ff88', width=1.5)))
+            
+            if 'congestion_prediction' in df.columns:
+                pred_data = df[df['congestion_prediction'] == 1]
+                if not pred_data.empty:
+                    fig.add_trace(go.Scatter(x=pred_data['timestamp'], y=pred_data['network_score'],
+                                            mode='markers', name='⚠️ Congestion Predicted',
+                                            marker=dict(size=12, color='#ff003c', symbol='x'),
+                                            yaxis='y'))
+            
+            fig.update_layout(
+                title="Network Metrics & AI Predictions Over Time",
+                xaxis=dict(gridcolor='rgba(0,245,255,0.05)'),
+                yaxis=dict(title='Score', range=[0, 100], gridcolor='rgba(0,245,255,0.05)'),
+                yaxis2=dict(title='Speed (Mbps)', overlaying='y', side='right'),
+                template='plotly_dark', height=400,
+                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)'
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            
+            display_cols = ['timestamp', 'network_score', 'network_status', 'combined_speed']
+            if 'congestion_prediction' in df.columns:
+                df['congestion'] = df['congestion_prediction'].map({0: 'No', 1: '⚠️ Yes'})
+                display_cols.append('congestion')
+            if 'prediction_probability' in df.columns:
+                display_cols.append('prediction_probability')
+            
+            st.dataframe(df[display_cols].tail(20), use_container_width=True)
+            
+            csv = df.to_csv(index=False)
+            st.download_button("📥 Export CSV", csv, "netpulse_data.csv", "text/csv")
+        else:
+            st.info("No historical data yet")
+
+    # TAB 3 - DIAGNOSTICS
+    with tab3:
+        st.markdown("### 🔍 NETWORK DIAGNOSTICS & ANALYSIS")
+        
+        data = st.session_state.data
+        
+        if data and data['network_score'] > 0:
+            health_scores = get_network_health_score(data)
+            
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("📡 Latency Health", f"{health_scores.get('latency', 0):.0f}/100")
+            with col2:
+                st.metric("📦 Packet Loss Health", f"{health_scores.get('packet_loss', 0):.0f}/100")
+            with col3:
+                st.metric("⚡ Bandwidth Health", f"{health_scores.get('bandwidth', 0):.0f}/100")
+            with col4:
+                st.metric("🔒 Stability Health", f"{health_scores.get('stability', 0):.0f}/100")
+            
+            st.markdown('<div class="cyber-divider"></div>', unsafe_allow_html=True)
+            
+            overall = health_scores.get('overall', 0)
+            st.markdown(f"""
+            <div class="diagnostic-card">
+                <div style="font-family:'Orbitron',monospace; font-size:0.9rem; margin-bottom:10px;">
+                    🩺 OVERALL NETWORK HEALTH: {overall:.0f}/100
+                </div>
+                <div class="health-meter">
+                    <div style="width:{overall}%; height:100%; background: linear-gradient(90deg, #00ff88, #00f5ff); border-radius:4px;"></div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            st.markdown("### 📋 DIAGNOSTIC REPORT")
+            diagnostics = analyze_network_performance(data)
+            
+            if diagnostics:
+                for diag in diagnostics:
+                    severity_color = {
+                        'critical': '#ff003c',
+                        'warning': '#ff6b00',
+                        'good': '#00ff88'
+                    }.get(diag['severity'], '#00f5ff')
+                    
+                    st.markdown(f"""
+                    <div class="diagnostic-card" style="border-left: 3px solid {severity_color};">
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                            <strong style="color:{severity_color};">⚠️ {diag['category']}</strong>
+                            <span style="color:#5a7a9a; font-size:0.7rem;">Value: {diag['metric_value']:.1f}</span>
+                        </div>
+                        <div style="margin: 8px 0; color: #a0b8cc;">{diag['message']}</div>
+                        <div style="font-size:0.8rem; color: #00f5ff;">💡 Solution: {diag['solution']}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+            else:
+                st.markdown("""
+                <div class="diagnostic-card" style="border-left: 3px solid #00ff88;">
+                    <strong style="color:#00ff88;">✅ ALL SYSTEMS NOMINAL</strong>
+                    <div style="margin: 8px 0; color: #a0b8cc;">No critical issues detected. Network performance is within acceptable parameters.</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            st.markdown('<div class="cyber-divider"></div>', unsafe_allow_html=True)
+            st.markdown("### 📈 HISTORICAL PERFORMANCE ANALYSIS")
+            
+            hist_data = st.session_state.history_data
+            if hist_data and len(hist_data) >= 2:
+                perf_metrics = get_performance_metrics(hist_data)
+                
+                col_a, col_b, col_c, col_d = st.columns(4)
+                with col_a:
+                    st.metric("📊 Avg Score", f"{perf_metrics.get('avg_score', 0):.0f}/100")
+                with col_b:
+                    st.metric("📉 Min Score", f"{perf_metrics.get('min_score', 0):.0f}/100")
+                with col_c:
+                    st.metric("📈 Max Score", f"{perf_metrics.get('max_score', 0):.0f}/100")
+                with col_d:
+                    trend_icon = "📈" if perf_metrics.get('trend') == 'improving' else "📉"
+                    trend_color = "#00ff88" if perf_metrics.get('trend') == 'improving' else "#ff6b00"
+                    st.markdown(f"""
+                    <div style="background:rgba(0,0,0,0.25); border-radius:8px; padding:0.5rem;">
+                        <div style="font-family:'Share Tech Mono',monospace; font-size:0.7rem; color:#7a9abc;">TREND</div>
+                        <div style="font-family:'Orbitron',monospace; font-size:1.2rem; color:{trend_color};">{trend_icon} {perf_metrics.get('trend', 'stable').upper()}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                st.markdown(f"""
+                <div class="diagnostic-card">
+                    <strong>📊 Performance Summary</strong><br>
+                    • Congestion Rate: {perf_metrics.get('congestion_rate', 0):.1f}% of monitored periods<br>
+                    • Score Stability: ±{perf_metrics.get('std_dev', 0):.1f} points deviation<br>
+                    • Network consistency is {'stable' if perf_metrics.get('std_dev', 0) < 15 else 'volatile'}
+                </div>
+                """, unsafe_allow_html=True)
+            
+            st.markdown('<div class="cyber-divider"></div>', unsafe_allow_html=True)
+            st.markdown("### 🛠 QUICK ACTIONS")
+            
+            col_q1, col_q2, col_q3 = st.columns(3)
+            with col_q1:
+                if st.button("🔄 Force Refresh", use_container_width=True):
+                    refresh_data()
+                    st.rerun()
+            with col_q2:
+                if st.button("📧 Send Diagnostic Report", use_container_width=True):
+                    diagnostics = analyze_network_performance(data)
+                    diagnostic_text = "\n".join([f"- {d['category']}: {d['message']}" for d in diagnostics[:5]])
+                    send_email_notification(
+                        "Diagnostic Report",
+                        f"Network Score: {data['network_score']:.0f}/100\n\nIssues Found:\n{diagnostic_text}",
+                        "diagnostic"
+                    )
+                    st.success("Diagnostic report sent!")
+            with col_q3:
+                if st.button("🗑 Clear History", use_container_width=True):
+                    st.session_state.history_data = []
+                    st.success("History cleared!")
+                    st.rerun()
+            
+        else:
+            st.info("📡 Waiting for network data to perform diagnostics...")
+
+    # TAB 4 - LOGS (simplified - no database)
+    with tab4:
+        st.markdown("### 📝 SYSTEM LOGS")
+        st.caption(f"📡 Auto-updates every {REFRESH_INTERVAL}s · Last {len(st.session_state.history_data)} records")
+        st.info("📡 Logs are stored in memory only. Recent activity shown below.")
+        
+        # Show recent events from session state
+        if st.session_state.history_data:
+            recent_entries = st.session_state.history_data[-20:]
+            for entry in reversed(recent_entries):
+                ts = entry.get('timestamp', datetime.now()).strftime('%H:%M:%S')
+                score = entry.get('network_score', 0)
+                status = entry.get('network_status', 'UNKNOWN')
+                pred = entry.get('congestion_prediction', 0)
+                pred_text = "⚠️ Congestion" if pred == 1 else "✅ Normal"
+                
+                st.markdown(f"""
+                <div style="background:rgba(0,0,0,0.2); border-left:2px solid {score_color(score)}; padding:6px 12px; margin:4px 0;">
+                    <span style="color:#5a7a9a; font-size:0.7rem;">{ts}</span>
+                    <strong style="color:{score_color(score)};"> [NETWORK]</strong>
+                    <span style="color:#a0b8cc;">Score: {score:.0f}/100 | {status} | {pred_text}</span>
+                    <span style="color:#5a7a9a; font-size:0.6rem; margin-left:8px;">#{st.session_state.fetch_count}</span>
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.info("No history yet - waiting for data")
 
 if __name__ == "__main__":
     main()
