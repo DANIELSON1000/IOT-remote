@@ -2,7 +2,7 @@
 """
 NetPulse AI Monitor - Complete Edition with Congestion Prediction
 Enhanced Cyberpunk UI with Manual ESP8266 IP Control + ML Prediction
-NO DATABASE VERSION
+AUTO-UPDATE EVERY 30 SECONDS
 """
 
 import streamlit as st
@@ -36,7 +36,8 @@ st.set_page_config(
 ONLINE_THRESHOLD_SECONDS = 60
 STALE_THRESHOLD_SECONDS = 120
 OFFLINE_THRESHOLD_SECONDS = 300
-REFRESH_INTERVAL = 15
+REFRESH_INTERVAL = 30  # ⬅️ UPDATED: Auto-refresh every 30 seconds
+THINGSPEAK_UPDATE_INTERVAL = 15  # ThingSpeak updates every 15 seconds
 
 ESP8266_PORT = 80
 
@@ -98,7 +99,9 @@ def init_session_state():
         'diagnostic_history': [],
         'last_congestion_alert_sent': None,
         'last_esp_command_response': None,
-        'history_data': []  # In-memory history for charts
+        'history_data': [],  # In-memory history for charts
+        'last_fetch_time': None,  # Track when we last fetched from ThingSpeak
+        'fetch_count': 0  # Count successful fetches
     }
     
     for key, val in defaults.items():
@@ -723,7 +726,12 @@ def fetch_thingspeak_data():
         return None, OFFLINE_THRESHOLD_SECONDS, None, "offline"
 
 def refresh_data():
+    """Fetch data from ThingSpeak and update session state"""
     data, td, lu, status = fetch_thingspeak_data()
+    
+    # Update fetch tracking
+    st.session_state.last_fetch_time = datetime.now()
+    
     if data and data['network_score'] > 0:
         prev = st.session_state.data
         changed = prev is None or any(
@@ -736,6 +744,7 @@ def refresh_data():
         st.session_state.last_update = lu
         st.session_state.status = status
         st.session_state.last_refresh = datetime.now()
+        st.session_state.fetch_count += 1
         
         # Run congestion prediction
         prediction, probability = predict_congestion(
@@ -760,7 +769,14 @@ def refresh_data():
             check_and_send_alerts(data, prediction, probability)
         
         return True
-    return False
+    elif data and data['network_score'] == 0:
+        # Data exists but score is 0 - might be initial reading
+        st.session_state.last_refresh = datetime.now()
+        return False
+    else:
+        # No data or offline
+        st.session_state.last_refresh = datetime.now()
+        return False
 
 # -------------------------
 # CSS
@@ -1087,23 +1103,42 @@ st.markdown("""
         background: linear-gradient(90deg, #ff003c, #ff6b00, #ffe600, #00f5ff, #00ff88);
         margin: 10px 0;
     }
+    
+    .update-counter {
+        font-family: 'Share Tech Mono', monospace;
+        font-size: 0.7rem;
+        color: #5a7a9a;
+        margin-top: 4px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 # -------------------------
-# Auto Refresh
+# Auto Refresh Handler
 # -------------------------
-now = datetime.now()
-since_refresh = (now - st.session_state.last_refresh).total_seconds()
-
-if since_refresh >= REFRESH_INTERVAL and st.session_state.auto_refresh:
-    refresh_data()
-    st.rerun()
+def handle_auto_refresh():
+    """Handle the auto-refresh logic with 30-second interval"""
+    now = datetime.now()
+    since_refresh = (now - st.session_state.last_refresh).total_seconds()
+    
+    # Check if it's time to refresh
+    if since_refresh >= REFRESH_INTERVAL and st.session_state.auto_refresh:
+        # Check if ThingSpeak likely has new data (every 15 seconds)
+        # We fetch every 30 seconds, so we get every other update
+        refresh_data()
+        st.rerun()
+    
+    # Calculate time until next refresh
+    next_refresh = max(0, REFRESH_INTERVAL - since_refresh)
+    return next_refresh
 
 # -------------------------
 # MAIN APP
 # -------------------------
 def main():
+    # Handle auto-refresh
+    next_refresh = handle_auto_refresh()
+    
     pulse_class = "data-updated" if st.session_state.pulse_triggered else ""
     st.session_state.pulse_triggered = False
 
@@ -1119,6 +1154,7 @@ def main():
             {(' · 🧪 TEST MODE' if st.session_state.test_mode else '')}
             {' · ' + model_status}
         </div>
+        <div class="update-counter">⏱ Auto-updates every {REFRESH_INTERVAL}s · Fetched: {st.session_state.fetch_count} times</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1138,6 +1174,7 @@ def main():
             if auto_refresh != st.session_state.auto_refresh:
                 st.session_state.auto_refresh = auto_refresh
                 st.rerun()
+            st.caption(f"⏱ {REFRESH_INTERVAL}s interval")
         with col2:
             if st.button("⟳", help="Refresh Now", use_container_width=True):
                 refresh_data()
@@ -1294,11 +1331,14 @@ def main():
 
         # Timer
         if st.session_state.auto_refresh:
-            next_refresh = max(0, REFRESH_INTERVAL - since_refresh)
             st.markdown(f"""
             <div class="sidebar-stat">
                 <span class="sidebar-stat-label">⏱ NEXT UPDATE</span>
                 <span class="sidebar-stat-value">{int(next_refresh)}s</span>
+            </div>
+            <div class="sidebar-stat">
+                <span class="sidebar-stat-label">🔄 FETCHES</span>
+                <span class="sidebar-stat-value">{st.session_state.fetch_count}</span>
             </div>
             """, unsafe_allow_html=True)
 
@@ -1315,10 +1355,13 @@ def main():
             'offline': ('status-offline', '✕ OFFLINE', '#ff003c'),
         }
         sc, sl, scolor = status_map.get(status, ('status-offline', '✕ OFFLINE', '#ff003c'))
+        
+        # Show time since last ThingSpeak update
+        last_update_str = format_time_diff(td) if td else "—"
         st.markdown(f"""
         <div class="sidebar-stat">
             <span class="{sc}" style="font-family:'Share Tech Mono',monospace;">{sl}</span>
-            <span class="sidebar-stat-label" style="color:{scolor};">{format_time_diff(td) if td else "—"}</span>
+            <span class="sidebar-stat-label" style="color:{scolor};">{last_update_str}</span>
         </div>
         """, unsafe_allow_html=True)
 
@@ -1360,6 +1403,7 @@ def main():
                     <div class="score-label">/ 100</div>
                     <div class="score-status" style="color:{nc};">{network_status}</div>
                     <div style="margin-top:12px;">{data['combined_speed']:.1f} MBPS</div>
+                    <div style="margin-top:6px; font-size:0.6rem; color:#5a7a9a;">Updated: {st.session_state.last_refresh.strftime('%H:%M:%S')}</div>
                 </div>
                 """, unsafe_allow_html=True)
             
@@ -1469,6 +1513,7 @@ def main():
     # TAB 2 - HISTORICAL
     with tab2:
         st.markdown("### 📊 HISTORICAL DATA & PREDICTIONS")
+        st.caption(f"📡 Auto-updates every {REFRESH_INTERVAL}s · Showing last 100 records")
         hist_data = st.session_state.history_data
         
         if hist_data:
@@ -1643,11 +1688,12 @@ def main():
     # TAB 4 - LOGS (simplified - no database)
     with tab4:
         st.markdown("### 📝 SYSTEM LOGS")
+        st.caption(f"📡 Auto-updates every {REFRESH_INTERVAL}s · Last {len(st.session_state.history_data)} records")
         st.info("📡 Logs are stored in memory only. Recent activity shown below.")
         
         # Show recent events from session state
         if st.session_state.history_data:
-            recent_entries = st.session_state.history_data[-10:]
+            recent_entries = st.session_state.history_data[-20:]
             for entry in reversed(recent_entries):
                 ts = entry.get('timestamp', datetime.now()).strftime('%H:%M:%S')
                 score = entry.get('network_score', 0)
@@ -1660,6 +1706,7 @@ def main():
                     <span style="color:#5a7a9a; font-size:0.7rem;">{ts}</span>
                     <strong style="color:{score_color(score)};"> [NETWORK]</strong>
                     <span style="color:#a0b8cc;">Score: {score:.0f}/100 | {status} | {pred_text}</span>
+                    <span style="color:#5a7a9a; font-size:0.6rem; margin-left:8px;">#{st.session_state.fetch_count}</span>
                 </div>
                 """, unsafe_allow_html=True)
         else:
